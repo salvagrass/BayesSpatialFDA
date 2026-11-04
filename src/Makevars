@@ -1,0 +1,12 @@
+# Setting standard
+CXX_STD = CXX14
+
+# Include path
+PKG_CPPFLAGS = -I../inst/include
+
+# Compilation Flags
+PKG_CXXFLAGS = -Wno-ignored-attributes
+
+# Comopilation Rules
+SOURCES = $(wildcard *.cpp) $(wildcard */*.cpp)
+OBJECTS = $(SOURCES:.cpp=.o)
