@@ -10,3 +10,9 @@ PKG_CXXFLAGS = -Wno-ignored-attributes
 # Comopilation Rules
 SOURCES = $(wildcard *.cpp) $(wildcard */*.cpp)
 OBJECTS = $(SOURCES:.cpp=.o)
+
+all: $(SHLIB)
+
+clean:
+	rm -f *.o *.so *.dll
+	rm -f MatrixAssembler/*.o

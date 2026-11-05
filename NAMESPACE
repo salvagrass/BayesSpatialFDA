@@ -2,6 +2,13 @@
 
 export(build_spde_matrices)
 export(generate_toy_data)
+export(sample_normal_vector)
+import(Matrix)
 import(RcppEigen)
+import(fmesher)
+importFrom(Matrix,
+  Diagonal,
+  Matrix
+)
 importFrom(Rcpp,sourceCpp)
 useDynLib(BayesSpatialFDA, .registration = TRUE)

@@ -1,9 +1,9 @@
 Package: BayesSpatialFDA
-Title: What the Package Does (One Line, Title Case)
+Title: Bayesian Smoothing Of Functional Data On Spatial Domains
 Version: 0.0.0.9000
 Authors@R: 
     person("First", "Last", , "first.last@example.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
+Description: Implements a Gibbs sampler for Bayesian spatial functional data analysis using the SPDE approach and RcppEigen.
 License: GPL (>= 3)
 Config/roxygen2/version: 8.1.1
 Encoding: UTF-8
@@ -13,5 +13,6 @@ LinkingTo:
     RcppEigen
 Imports: 
     Rcpp,
+    RcppEigen,
     Matrix,
     fmesher

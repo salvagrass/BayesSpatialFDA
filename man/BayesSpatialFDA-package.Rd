@@ -4,9 +4,9 @@
 \name{BayesSpatialFDA-package}
 \alias{BayesSpatialFDA}
 \alias{BayesSpatialFDA-package}
-\title{BayesSpatialFDA: What the Package Does (One Line, Title Case)}
+\title{BayesSpatialFDA: Bayesian Smoothing Of Functional Data On Spatial Domains}
 \description{
-What the package does (one paragraph).
+Implements a Gibbs sampler for Bayesian spatial functional data analysis using the SPDE approach and RcppEigen.
 }
 \author{
 \strong{Maintainer}: First Last \email{first.last@example.com}
