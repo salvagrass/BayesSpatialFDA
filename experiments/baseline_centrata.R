@@ -44,8 +44,8 @@ Psi_prior <- diag(1, nv)
 # Prior per l'intercetta globale (Normale con media 0 e sd 10)
 var_a_prior <- 10.0^2
 
-n_iter <- 20000
-burn_in <- 5000
+n_iter <- 10000
+burn_in <- 500
 
 samples_mu <- matrix(0, nrow = n_iter, ncol = nv)
 samples_a1 <- numeric(n_iter) # Salviamo l'intercetta del primo anno per test
