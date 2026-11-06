@@ -89,6 +89,11 @@ for (iter in 1:n_iter) {
   m_mu_post <- V_mu_post %*% (Sigma_inv %*% sum_resid)
   current_mu <- MASS::mvrnorm(1, mu = as.vector(m_mu_post), Sigma = V_mu_post)
 
+  # CENTRATURA PER IDENTIFICABILITÀ
+  mean_mu <- mean(current_mu)
+  current_mu <- current_mu - mean_mu
+  current_a <- current_a + mean_mu
+
   # B) Aggiornamento Covarianza (Sigma) tramite Inverse-Wishart
   nu_post <- nu_prior + M
   S_post <- Psi_prior
@@ -148,4 +153,84 @@ plot(burn_in:n_iter, samples_a1[burn_in:n_iter], type = "l", col = "purple",
 abline(h = a_real[1], col = "red", lwd = 2)
 
 par(mfrow = c(1, 1))
+
+
+# ==============================================================================
+# PROFILING RIGOROSO CON REPLICHE E DIMENSIONI ESTESE
+# ==============================================================================
+mesh_sizes <- c(100, 200, 400, 800, 1600, 2400, 3200)
+inversion_times <- numeric(length(mesh_sizes))
+n_rep <- 5 # Numero di repliche per smorzare il rumore del sistema
+
+cat("Avvio stress-test dell'inversione matriciale densa...\n")
+for (i in seq_along(mesh_sizes)) {
+  N <- mesh_sizes[i]
+
+  times_rep <- numeric(n_rep)
+  for(r in 1:n_rep) {
+    dummy_mat <- crossprod(matrix(rnorm(N * N), N, N)) + diag(0.1, N)
+
+    t_start <- proc.time()["elapsed"]
+    dummy_inv <- solve(dummy_mat)
+    t_end <- proc.time()["elapsed"]
+
+    times_rep[r] <- as.numeric(t_end - t_start)
+  }
+
+  # Usiamo la mediana per ignorare eventuali spike della CPU
+  inversion_times[i] <- median(times_rep)
+  cat("Vertici:", N, "- Tempo mediano su", n_rep, "run:", round(inversion_times[i], 4), "sec\n")
+}
+
+# --- PLOT EVIDENZA COMPUTAZIONALE CORRETTA ---
+plot(mesh_sizes, inversion_times, type = "b", pch = 16, col = "darkred", lwd = 2,
+     main = "Classe di Complessità: Inversione di Sigma (Stress Test)",
+     xlab = "Numero di Vertici della Mesh (N)", ylab = "Tempo mediano (secondi)")
+
+# Punto di ancoraggio sull'ultimo calcolo
+N_last <- mesh_sizes[length(mesh_sizes)]
+T_last <- inversion_times[length(mesh_sizes)]
+
+# Costanti di scala
+#c_2 <- T_last / (N_last^2)
+c_3 <- T_last / (N_last^3)
+
+# Curve teoriche
+lines(mesh_sizes, c_3 * mesh_sizes^3, col = "blue", lty = 2, lwd = 2)        # O(N^3)
+#lines(mesh_sizes, c_2 * mesh_sizes^2, col = "forestgreen", lty = 2, lwd = 2) # O(N^2)
+
+
+legend("topleft",
+       legend = c("Tempo empirico (Mediana)",
+                  #expression("Crescita Teorica " ~ O(N^2)),
+                  expression("Crescita Teorica " ~ O(N^3))),
+       #col = c("darkred", "forestgreen", "blue"), scommenta se vuoi usare anche N^2
+       col = c("darkred", "blue"),
+       lwd = 2, lty = c(1, 2, 2), pch = c(16, NA, NA), bty = "n")
+
+# ==============================================================================
+# RIASSUNTO FINALE: VALUTAZIONE DELLA BASELINE BAYESIANA (GIBBS SAMPLER)
+# ==============================================================================
+#
+# 1. CORRETTEZZA STATISTICA (SUCCESSO)
+#    - L'implementazione del Gibbs Sampler con Inverse-Wishart è matematicamente esatta.
+#    - L'aggiunta della centratura spaziale ha risolto i problemi di identificabilità.
+#    - Su una mesh giocattolo con T=25 anni, l'algoritmo separa perfettamente l'intercetta
+#      globale (deriva temporale) dal campo spaziale (struttura geografica).
+#    - Le catene MCMC raggiungono un eccellente mixing (bassa autocorrelazione)
+#      e l'RMSE converge stabilmente senza bias sistematici.
+#
+# 2. LIMITE COMPUTAZIONALE E ASINTOTICO (FALLIMENTO STRUTTURALE)
+#    - Lo stress-test empirico ha dimostrato che l'algoritmo è dominato dall'inversione
+#      della matrice di covarianza spaziale densa ad ogni iterazione.
+#    - L'estrapolazione sul dataset reale (64.800 vertici) stima un tempo di circa 2.5 ore
+#      per una singola inversione, rendendo impraticabile l'esecuzione di catene MCMC
+#      di lunghezza adeguata (anni di calcolo stimati).
+#    - La matrice densa da sola richiederebbe oltre 33 GB di RAM.
+#
+# CONCLUSIONE:
+# La formulazione densa è teoricamente solida ma computazionalmente intrattabile su scala reale.
+# Si rende obbligatorio l'abbandono dell'Inverse-Wishart in favore di metodi basati
+# su matrici di precisione intrinsecamente sparse (SPDE/NNGP) per abbattere i costi O(N^3).
+# ==============================================================================
 
