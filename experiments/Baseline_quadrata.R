@@ -1,5 +1,5 @@
 # ==============================================================================
-# TEST DEFINITIVO: ACCURATEZZA E TEMPI (GRAFICI SEPARATI E GRANDI)
+# TEST DEFINITIVO: ACCURATEZZA E TEMPI CON CURVA O(N^3) ANCORATA
 # ==============================================================================
 
 library(fmesher)
@@ -11,8 +11,7 @@ library(devtools)
 load_all("R")
 
 # --- 2. CONFIGURAZIONE DEL BENCHMARK ---
-# Griglie quadrate per approssimare i tuoi target: 5x5(25), 7x7(49), 9x9(81), 10x10(100)
-grid_sizes <- c(5, 7, 9, 10)
+grid_sizes <- c(10, 15, 20, 30)
 M_years <- 25
 n_iter <- 2000
 burn_in <- 500
@@ -20,20 +19,25 @@ burn_in <- 500
 real_N_list <- numeric(length(grid_sizes))
 time_results <- numeric(length(grid_sizes))
 
-# Liste separate per i risultati (non li mischiamo più!)
-mu_real_list <- list()
-mu_post_list <- list()
+all_mu_real <- numeric(0)
+all_mu_post <- numeric(0)
 
-cat("========================================================\n")
-cat(" ESECUZIONE GIBBS SAMPLER SU 4 MESH QUADRATE\n")
-cat("========================================================\n\n")
+cat("========================================================
+")
+cat(" ESECUZIONE GIBBS SAMPLER SU 4 MESH QUADRATE
+")
+cat("========================================================
+
+")
 
 # --- 3. CICLO SUI DIVERSI NUMERI DI NODI ---
 for (idx in seq_along(grid_sizes)) {
 
   gs <- grid_sizes[idx]
-  cat("--------------------------------------------------------\n")
-  cat(sprintf(" RUN %d/4: GRIGLIA %dx%d (Target: %d vertici)\n", idx, gs, gs, gs^2))
+  cat("--------------------------------------------------------
+")
+  cat(sprintf(" RUN %d/4: GRIGLIA %dx%d
+", idx, gs, gs))
 
   # A) Creazione Mesh Quadrata
   x_seq <- seq(0, 1, length.out = gs)
@@ -43,7 +47,8 @@ for (idx in seq_along(grid_sizes)) {
 
   N <- mesh_current$n
   real_N_list[idx] <- N
-  cat(sprintf(" -> Vertici reali della mesh: %d \n", N))
+  cat(sprintf(" -> Vertici reali della mesh: %d
+", N))
 
   # B) Generazione Dati
   toy_data <- generate_toy_data(
@@ -101,50 +106,55 @@ for (idx in seq_along(grid_sizes)) {
   t_end <- Sys.time()
   exec_time <- as.numeric(difftime(t_end, t_start, units = "secs"))
   time_results[idx] <- exec_time
-  cat(sprintf(" -> Tempo di esecuzione: %.2f secondi\n\n", exec_time))
+  cat(sprintf(" -> Tempo di esecuzione: %.2f secondi
 
-  # Salviamo i risultati SEPARATAMENTE nelle liste
-  mu_real_list[[idx]] <- mu_real
-  mu_post_list[[idx]] <- colMeans(samples_mu[burn_in:n_iter, ])
+", exec_time))
+
+  mu_post_mean <- colMeans(samples_mu[burn_in:n_iter, ])
+  all_mu_real <- c(all_mu_real, mu_real)
+  all_mu_post <- c(all_mu_post, mu_post_mean)
 }
 
 
 # ==============================================================================
-# 4. PLOT SEPARATI E GRANDI
+# 4. PLOT (LAYOUT 1x3 CON ANCORAGGIO ALL'ULTIMO PUNTO)
 # ==============================================================================
 
-# PLOT 1: ACCURATEZZA (4 Scatterplot separati in una griglia 2x2 per i 4 casi)
-par(mfrow = c(2, 2))
-for(idx in 1:4) {
-  plot_limits <- range(c(mu_real_list[[idx]], mu_post_list[[idx]]))
-  plot(mu_real_list[[idx]], mu_post_list[[idx]], pch = 16, col = "royalblue",
-       xlab = "Vero valore di mu", ylab = "Stima a posteriori",
-       main = sprintf("Accuratezza Gibbs (%d nodi)", real_N_list[idx]),
-       xlim = plot_limits, ylim = plot_limits)
-  abline(0, 1, col = "red", lwd = 2, lty = 2)
-}
+par(mfrow = c(1, 3))
 
-# --- Da qui in poi, riportiamo il layout a grafico SINGOLO GRANDE ---
-par(mfrow = c(1, 1))
+# --- PLOT 1: Accuratezza Globale (Tutte le mesh combinate) ---
+plot_limits <- range(c(all_mu_real, all_mu_post))
+plot(all_mu_real, all_mu_post, pch = 16, col = "royalblue",
+     xlab = "Vero valore di mu", ylab = "Stima a posteriori",
+     main = "Accuratezza Gibbs (25-100 Nodi)",
+     xlim = plot_limits, ylim = plot_limits)
+abline(0, 1, col = "red", lwd = 2, lty = 2)
 
-# PLOT 2: CRESCITA DEI TEMPI (Grafico a barre - i 4 casi separati visivamente)
-barplot(time_results, names.arg = paste(real_N_list, "nodi"),
-        col = "darkorange", ylab = "Tempo Totale MCMC (sec)",
-        main = "Crescita dei Tempi (Separata per i 4 casi)")
+# --- CALCOLO CURVA TEORICA ANCORATA AL PUNTO PIÙ GRANDE ---
+# Invece di usare time_results[1], usiamo l'ultimo punto per non distorcere
+# la curva con i costi fissi (overhead) di R sulle matrici piccole.
+n_last <- length(real_N_list)
+curva_teorica <- time_results[n_last] * (real_N_list / real_N_list[n_last])^3
 
-# PLOT 3: CRESCITA DEI TEMPI (Curva Lineare come da tua immagine)
+# --- PLOT 2: Crescita dei Tempi (Lineare) ---
+y_max_lin <- max(c(time_results, curva_teorica))
 plot(real_N_list, time_results, type = "b", pch = 16, col = "darkred",
      xlab = "Numero di Vertici della Mesh (N)", ylab = "Tempo Totale MCMC (sec)",
-     main = "Crescita dei Tempi (Curva Lineare O(N^3))")
-curva_teorica <- time_results[1] * (real_N_list / real_N_list[1])^3
+     main = "Crescita dei Tempi (Lineare)", ylim = c(0, y_max_lin))
+
 lines(real_N_list, curva_teorica, col = "blue", lty = 2, lwd = 2)
 legend("topleft", legend = c("Tempo reale MCMC", "Crescita teorica O(N^3)"),
-       col = c("darkred", "blue"), lty = c(1, 2), pch = c(16, NA), cex = 1)
+       col = c("darkred", "blue"), lty = c(1, 2), pch = c(16, NA), cex = 0.8)
 
-# PLOT 4: CRESCITA DEI TEMPI (Scala Log-Log come da tua immagine)
+# --- PLOT 3: Crescita dei Tempi (Log-Log) ---
+y_limits_log <- range(c(log10(time_results), log10(curva_teorica)))
 plot(log10(real_N_list), log10(time_results), type = "b", pch = 16, col = "darkgreen",
      xlab = "Log10(Vertici)", ylab = "Log10(Tempo in sec)",
-     main = "Crescita dei Tempi (Scala Log-Log)")
+     main = "Crescita dei Tempi (Log-Log)", ylim = y_limits_log)
+
 lines(log10(real_N_list), log10(curva_teorica), col = "blue", lty = 2, lwd = 2)
 legend("topleft", legend = c("Dati empirici", "Pendenza Teorica (3)"),
-       col = c("darkgreen", "blue"), lty = c(1, 2), pch = c(16, NA), cex = 1)
+       col = c("darkgreen", "blue"), lty = c(1, 2), pch = c(16, NA), cex = 0.8)
+
+par(mfrow = c(1, 1))
+

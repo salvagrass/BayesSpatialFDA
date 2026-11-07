@@ -51,8 +51,8 @@ a_real <- a_real + mean_mu_real
 nu_prior <- nv + 2
 Psi_prior <- diag(1, nv)
 var_a_prior <- 10.0^2
-n_iter <- 10000
-burn_in <- 2000
+n_iter <- 5000
+burn_in <- 500
 
 samples_mu <- matrix(0, nrow = n_iter, ncol = nv)
 samples_a1 <- numeric(n_iter)
