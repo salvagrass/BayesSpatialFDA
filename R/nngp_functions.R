@@ -1,152 +1,130 @@
 # ==============================================================================
-# MODULO 1: COSTRUZIONE DEL GRAFO NNGP (Nearest Neighbors)
+# MODULO 1: COSTRUZIONE DEL GRAFO NNGP (Nearest Neighbors) OTTIMIZZATO
 # ==============================================================================
 
-#' Costruisce la struttura dei vicini per il modello NNGP
-#'
-#' @param coords Matrice Nx2 delle coordinate spaziali
-#' @param m Numero massimo di vicini da considerare (solitamente 10-15)
-#' @return Una lista contenente le coordinate ordinate, gli indici di ordinamento,
-#'         la matrice degli indici dei vicini e la matrice delle distanze.
+#' Costruisce la struttura dei vicini e PRE-CALCOLA tutte le distanze interne
 build_nngp_neighbors <- function(coords, m = 15) {
   N <- nrow(coords)
 
-  # 1. Ordinamento spaziale (Sweep lungo l'asse X, poi Y in caso di parità)
-  # Fondamentale per garantire che la matrice di precisione Q sia triangolare
+  # 1. Ordinamento spaziale
   ord <- order(coords[, 1], coords[, 2])
   coords_ord <- coords[ord, ]
 
-  # Strutture dati: matrici N x m.
-  # La riga i conterrà gli indici (e le distanze) dei vicini del punto i.
   nn_idx <- matrix(NA, nrow = N, ncol = m)
   nn_dist <- matrix(NA, nrow = N, ncol = m)
 
-  cat("Costruzione struttura NNGP per", N, "vertici con m =", m, "vicini...\n")
+  # NOVITÀ: Lista per conservare in cache le matrici di distanza INTERNE ai vicini
+  # Questo evita di chiamare dist() migliaia di volte durante la MCMC!
+  nn_dist_matrix_list <- vector("list", N)
 
-  # 2. Ricerca dei vicini (Condizionamento all'indietro)
-  # Il punto 1 non ha vicini precedenti. Iniziamo dal punto 2.
+  cat("Costruzione struttura NNGP e Caching per", N, "vertici (m =", m, ")...\n")
+
+  # 2. Ricerca e Caching
   for (i in 2:N) {
-    # Quanti vicini precedenti esistono al massimo per questo punto?
     num_neighbors <- min(m, i - 1)
-
-    # Estraiamo le coordinate di tutti i punti precedenti
     prev_coords <- coords_ord[1:(i - 1), , drop = FALSE]
 
-    # Calcoliamo la distanza euclidea tra il punto i e tutti i punti precedenti
-    # (Vettorizzato per velocità in base R)
+    # Distanza dal punto i ai precedenti
     dist_to_prev <- sqrt((prev_coords[, 1] - coords_ord[i, 1])^2 +
                            (prev_coords[, 2] - coords_ord[i, 2])^2)
 
-    # Ordiniamo le distanze per trovare i più vicini
     nearest <- order(dist_to_prev)[1:num_neighbors]
 
-    # Salviamo i risultati (gli indici si riferiscono all'array ordinato)
+    # Salviamo indici e distanze (dal punto i ai vicini)
     nn_idx[i, 1:num_neighbors] <- nearest
     nn_dist[i, 1:num_neighbors] <- dist_to_prev[nearest]
+
+    # CACHING: Calcoliamo QUI (una volta sola per tutta la vita del modello)
+    # le distanze reciproche TRA i vicini.
+    if(num_neighbors > 1) {
+      coords_neigh <- coords_ord[nearest, , drop = FALSE]
+      nn_dist_matrix_list[[i]] <- as.matrix(dist(coords_neigh))
+    } else {
+      nn_dist_matrix_list[[i]] <- matrix(0, 1, 1) # Nodo 2 ha 1 solo vicino, distanza da se stesso = 0
+    }
   }
 
   return(list(
     coords_ord = coords_ord,
     ord_indices = ord,
-    nn_idx = nn_idx,     # Chi sono i miei vicini?
-    nn_dist = nn_dist,   # Quanto distano da me?
+    nn_idx = nn_idx,
+    nn_dist = nn_dist,
+    nn_dist_matrix = nn_dist_matrix_list, # <--- La chiave della nuova velocità
     m = m
   ))
 }
 
 # ==============================================================================
-# MODULO 2: COSTRUZIONE DELLA MATRICE DI PRECISIONE NNGP (SPARSA)
+# MODULO 2: COSTRUZIONE DELLA MATRICE DI PRECISIONE NNGP (ULTRA VELOCE)
 # ==============================================================================
 
-#' Costruisce la matrice di precisione sparsa Q usando il grafo NNGP
-#'
-#' @param nngp_struct Lista restituita da build_nngp_neighbors()
-#' @param sigma2 Varianza spaziale (marginal variance)
-#' @param phi Parametro di decadimento spaziale (spatial decay, range = 3/phi)
-#' @return Matrice di precisione sparsa Q_final nelle coordinate originali
+#' Costruisce la matrice di precisione sfruttando il caching delle distanze
 build_nngp_precision <- function(nngp_struct, sigma2, phi) {
 
   N <- nrow(nngp_struct$coords_ord)
   m <- nngp_struct$m
   nn_idx <- nngp_struct$nn_idx
-  coords <- nngp_struct$coords_ord
 
-  # Strutture per creare la matrice sparsa in formato "triplet" (i, j, valore)
-  # B_nngp ha 1 sulla diagonale e fino a m valori fuori diagonale per riga
   max_elements <- N + N * m
   i_vec <- numeric(max_elements)
   j_vec <- numeric(max_elements)
   x_vec <- numeric(max_elements)
 
   F_vec <- numeric(N)
-  idx_count <- 1
 
-  # Nodo 1: non ha vicini precedenti, la sua varianza condizionata è quella marginale
+  # Nodo 1
   F_vec[1] <- sigma2
-  i_vec[idx_count] <- 1
-  j_vec[idx_count] <- 1
-  x_vec[idx_count] <- 1
-  idx_count <- idx_count + 1
+  i_vec[1] <- 1
+  j_vec[1] <- 1
+  x_vec[1] <- 1
+  idx_count <- 2 # Inizializziamo a 2 per il prossimo inserimento
 
-  # Ciclo sui restanti nodi
+  # Ciclo sui restanti nodi (Senza chiamate a dist() e senza cicli for annidati)
   for (i in 2:N) {
-    # Identifichiamo i vicini effettivi del nodo (ignorando gli NA iniziali)
     num_neigh <- sum(!is.na(nn_idx[i, ]))
     neigh <- nn_idx[i, 1:num_neigh]
 
-    # Matrice di covarianza tra i vicini (C_neigh)
-    # È qui che risparmiamo: questa matrice è al massimo m x m (es. 15x15)!
-    coords_neigh <- coords[neigh, , drop = FALSE]
-    dist_neigh <- as.matrix(dist(coords_neigh))
+    # --- Calcolo Covarianze ULTRA-VELOCE tramite Cache ---
+    # Non usiamo più dist(coords_neigh). Leggiamo dalla lista!
+    dist_neigh <- nngp_struct$nn_dist_matrix[[i]]
     C_neigh <- sigma2 * exp(-phi * dist_neigh)
 
-    # Covarianza incrociata tra il nodo i e i suoi vicini (c_cross)
-    # nngp_struct$nn_dist contiene già le distanze calcolate nello step precedente
     dist_i_neigh <- nngp_struct$nn_dist[i, 1:num_neigh]
     c_cross <- sigma2 * exp(-phi * dist_i_neigh)
 
-    # Risolviamo il micro-sistema lineare C_neigh * B_i = c_cross
-    # solve() su una 15x15 è istantaneo
+    # --- Risoluzione micro-sistema lineare ---
     B_i <- as.vector(solve(C_neigh, c_cross))
-
-    # Calcoliamo la varianza residua (condizionata)
     F_vec[i] <- sigma2 - sum(c_cross * B_i)
 
-    # --- Popoliamo la matrice sparsa B_nngp ---
-    # Diagonale = 1
+    # --- Assegnazione Vettorizzata nella matrice sparsa (NESSUN CICLO FOR) ---
+    end_idx <- idx_count + num_neigh
+
+    # 1. Mettiamo l'1 sulla diagonale
     i_vec[idx_count] <- i
     j_vec[idx_count] <- i
     x_vec[idx_count] <- 1
-    idx_count <- idx_count + 1
 
-    # Fuori diagonale (i pesi dei vicini col segno meno)
-    for(k in 1:num_neigh) {
-      i_vec[idx_count] <- i
-      j_vec[idx_count] <- neigh[k]
-      x_vec[idx_count] <- -B_i[k]
-      idx_count <- idx_count + 1
-    }
+    # 2. Mettiamo i coefficienti -B_i nei posti giusti IN BLOCCO
+    i_vec[(idx_count + 1):end_idx] <- i
+    j_vec[(idx_count + 1):end_idx] <- neigh
+    x_vec[(idx_count + 1):end_idx] <- -B_i
+
+    # Aggiorniamo il contatore globale
+    idx_count <- end_idx + 1
   }
 
-  # Tronchiamo i vettori alla loro lunghezza effettiva
   valid_len <- idx_count - 1
   i_vec <- i_vec[1:valid_len]
   j_vec <- j_vec[1:valid_len]
   x_vec <- x_vec[1:valid_len]
 
-  # Creiamo la matrice sparsa B usando il pacchetto Matrix
   B_nngp <- Matrix::sparseMatrix(i = i_vec, j = j_vec, x = x_vec, dims = c(N, N))
-
-  # Creiamo la matrice diagonale delle precisioni condizionate
   F_inv <- Matrix::Diagonal(x = 1 / F_vec)
 
-  # Ricaviamo la precisione globale (ordinata)
   Q_nngp <- Matrix::t(B_nngp) %*% F_inv %*% B_nngp
 
-  # ULTIMO STEP: Riportiamo la matrice Q all'ordinamento originale dei dati
+  # Ordinamento finale
   ord <- nngp_struct$ord_indices
   inv_ord <- order(ord)
-  Q_final <- Q_nngp[inv_ord, inv_ord]
-
-  return(Q_final)
+  return(Q_nngp[inv_ord, inv_ord])
 }
