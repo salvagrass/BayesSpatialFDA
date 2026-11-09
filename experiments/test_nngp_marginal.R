@@ -1,5 +1,5 @@
 # ==============================================================================
-# PROGETTO BAYESIANO: NNGP LATENTE VETTORIZZATO (ULTRA-VELOCE)
+# PROGETTO BAYESIANO: NNGP IBRIDO GIBBS/METROPOLIS (ALTA VELOCITA')
 # ==============================================================================
 
 library(Matrix)
@@ -28,10 +28,10 @@ for (i in 1:M) {
 
 nngp_struct <- build_nngp_neighbors(coords, m = 10)
 
-# SETUP MCMC: Grazie alla vettorizzazione faremo 25000 iterazioni in pochi secondi!
-n_iter <- 25000
-burn_in <- 5000
-thin_step <- 40
+# SETUP MCMC (Tempi tagliati del 70%)
+n_iter <- 50000
+burn_in <- 2000
+thin_step <- 20
 
 samples_mu <- matrix(0, nrow = n_iter, ncol = N)
 samples_sigma2_err <- numeric(n_iter)
@@ -45,92 +45,87 @@ curr_sigma2_spaz <- 0.5
 curr_phi <- 0.5
 prior_mu_prec <- Diagonal(N, 1e-4)
 
-# Varianze Proposte Iniziali per Metropolis
-prop_var_sig2 <- 0.05
+# Separiamo la scala dalla correlazione! R_phi assume varianza = 1.0
+R_phi <- build_nngp_precision(nngp_struct, 1.0, curr_phi)
+Q_nngp <- R_phi / curr_sigma2_spaz
+
+# Metropolis SOLO per phi
 prop_var_phi <- 0.05
-n_acc_sig2 <- 0; n_acc_phi <- 0
+n_acc_phi <- 0
 
-Q_nngp <- build_nngp_precision(nngp_struct, curr_sigma2_spaz, curr_phi)
-
-cat("\nAvvio Sampler VETTORIZZATO (", n_iter, "iterazioni )...\n")
+cat("\nAvvio Sampler Ibrido Vettorizzato (", n_iter, " iterazioni)...\n")
 pb <- txtProgressBar(min = 1, max = n_iter, style = 3)
 start_time <- Sys.time()
 
 for (iter in 1:n_iter) {
 
   # -----------------------------------------------------------------
-  # STEP 1: Aggiornamento mu (Vettorizzato)
+  # STEP 1: mu (Vettorizzato)
   # -----------------------------------------------------------------
   Q_post_mu <- Diagonal(N, M / curr_sigma2_err) + prior_mu_prec
-  # Sostituiamo il ciclo for con rowSums (Somma istantanea per riga)
   sum_residui_mu <- rowSums(Y_mat - curr_beta)
   b_post_mu <- sum_residui_mu / curr_sigma2_err
   curr_mu <- rnorm(N, mean = as.vector(b_post_mu / diag(Q_post_mu)), sd = sqrt(1 / diag(Q_post_mu)))
 
   # -----------------------------------------------------------------
-  # STEP 2: Aggiornamento beta_tilde (Vettorizzato con matrici M)
+  # STEP 2: beta (Vettorizzato matrice M x N)
   # -----------------------------------------------------------------
   Q_post_beta <- Q_nngp + Diagonal(N, 1 / curr_sigma2_err)
   chol_Q_beta <- chol(Q_post_beta)
-
-  # Invece di risolvere 25 sistemi uno alla volta, R risolve la matrice intera N x M in un colpo solo!
   b_post_beta_mat <- (Y_mat - curr_mu) / curr_sigma2_err
   mean_beta_post_mat <- as.matrix(solve(chol_Q_beta, solve(t(chol_Q_beta), b_post_beta_mat)))
-
-  # Estrazione del rumore per tutta la matrice
-  Z_noise <- matrix(rnorm(N * M), nrow = N, ncol = M)
-  curr_beta <- as.matrix(mean_beta_post_mat + solve(chol_Q_beta, Z_noise))
+  curr_beta <- as.matrix(mean_beta_post_mat + solve(chol_Q_beta, matrix(rnorm(N * M), nrow = N, ncol = M)))
 
   # -----------------------------------------------------------------
-  # STEP 3: Varianza Errore (Vettorizzato)
+  # STEP 3: Varianza Errore (Gibbs)
   # -----------------------------------------------------------------
   eps_mat <- Y_mat - curr_mu - curr_beta
   curr_sigma2_err <- 1 / rgamma(1, shape = (N * M) / 2 + 0.01, rate = sum(eps_mat^2) / 2 + 0.01)
 
   # -----------------------------------------------------------------
-  # STEP 4: METROPOLIS-HASTINGS LATENTE (Forme quadratiche istantanee)
+  # STEP 4: Varianza Spaziale (GIBBS DIRETTO! Addio Metropolis)
   # -----------------------------------------------------------------
-  ldet_curr <- as.numeric(determinant(Q_nngp, logarithm = TRUE)$modulus)
-  # Calcolo esatto traccia: sum(B * (Q %*% B)). Zero cicli for!
-  quad_curr <- sum(curr_beta * (Q_nngp %*% curr_beta))
-  ll_curr <- 0.5 * M * ldet_curr - 0.5 * quad_curr
+  # La forma quadratica usa solo la matrice R_phi (che ha varianza 1)
+  quad_R_phi <- sum(curr_beta * (R_phi %*% curr_beta))
 
-  # Proposta Varianza Spaziale
-  log_sig2_prop <- rnorm(1, mean = log(curr_sigma2_spaz), sd = sqrt(prop_var_sig2))
-  sig2_prop <- exp(log_sig2_prop)
-  Q_prop_sig <- build_nngp_precision(nngp_struct, sig2_prop, curr_phi)
-  ldet_prop_sig <- as.numeric(determinant(Q_prop_sig, logarithm = TRUE)$modulus)
-  quad_prop_sig <- sum(curr_beta * (Q_prop_sig %*% curr_beta))
-  ll_prop_sig <- 0.5 * M * ldet_prop_sig - 0.5 * quad_prop_sig
+  shape_spaz <- (N * M) / 2 + 0.01
+  rate_spaz  <- quad_R_phi / 2 + 0.01
+  curr_sigma2_spaz <- 1 / rgamma(1, shape = shape_spaz, rate = rate_spaz)
 
-  if (log(runif(1)) < (ll_prop_sig + dnorm(log_sig2_prop,0,5,log=T) - ll_curr - dnorm(log(curr_sigma2_spaz),0,5,log=T))) {
-    curr_sigma2_spaz <- sig2_prop
-    Q_nngp <- Q_prop_sig
-    ll_curr <- ll_prop_sig
-    n_acc_sig2 <- n_acc_sig2 + 1
-  }
+  # Aggiorniamo la precisione totale immediatamente
+  Q_nngp <- R_phi / curr_sigma2_spaz
 
-  # Proposta Decadimento (phi)
+  # -----------------------------------------------------------------
+  # STEP 5: METROPOLIS-HASTINGS (SOLO PER PHI)
+  # -----------------------------------------------------------------
   log_phi_prop <- rnorm(1, mean = log(curr_phi), sd = sqrt(prop_var_phi))
   phi_prop <- exp(log_phi_prop)
-  Q_prop_phi <- build_nngp_precision(nngp_struct, curr_sigma2_spaz, phi_prop)
-  ldet_prop_phi <- as.numeric(determinant(Q_prop_phi, logarithm = TRUE)$modulus)
-  quad_prop_phi <- sum(curr_beta * (Q_prop_phi %*% curr_beta))
-  ll_prop_phi <- 0.5 * M * ldet_prop_phi - 0.5 * quad_prop_phi
 
-  if (log(runif(1)) < (ll_prop_phi + dnorm(log_phi_prop,0,5,log=T) - ll_curr - dnorm(log(curr_phi),0,5,log=T))) {
+  # Costruiamo la matrice NNGP UNA SOLA VOLTA per iterazione!
+  R_phi_prop <- build_nngp_precision(nngp_struct, 1.0, phi_prop)
+  Q_prop_phi <- R_phi_prop / curr_sigma2_spaz
+
+  ldet_curr <- as.numeric(determinant(Q_nngp, logarithm = TRUE)$modulus)
+  ldet_prop <- as.numeric(determinant(Q_prop_phi, logarithm = TRUE)$modulus)
+
+  quad_curr <- quad_R_phi / curr_sigma2_spaz
+  quad_prop <- sum(curr_beta * (R_phi_prop %*% curr_beta)) / curr_sigma2_spaz
+
+  ll_curr <- 0.5 * M * ldet_curr - 0.5 * quad_curr
+  ll_prop <- 0.5 * M * ldet_prop - 0.5 * quad_prop
+
+  if (log(runif(1)) < (ll_prop + dnorm(log_phi_prop,0,5,log=T) - ll_curr - dnorm(log(curr_phi),0,5,log=T))) {
     curr_phi <- phi_prop
+    R_phi <- R_phi_prop
     Q_nngp <- Q_prop_phi
     n_acc_phi <- n_acc_phi + 1
   }
 
-  # Tuning Adattivo
+  # Tuning Adattivo solo per phi
   if (iter <= burn_in && iter %% 100 == 0) {
-    if (n_acc_sig2/100 > 0.44) prop_var_sig2 <- prop_var_sig2 * 1.2
-    if (n_acc_sig2/100 < 0.23) prop_var_sig2 <- prop_var_sig2 * 0.8
     if (n_acc_phi/100 > 0.44) prop_var_phi <- prop_var_phi * 1.2
     if (n_acc_phi/100 < 0.23) prop_var_phi <- prop_var_phi * 0.8
-    n_acc_sig2 <- 0; n_acc_phi <- 0
+    n_acc_phi <- 0
   }
 
   samples_mu[iter, ] <- curr_mu
@@ -142,6 +137,24 @@ for (iter in 1:n_iter) {
 }
 close(pb)
 cat("\nTempo totale:", round(Sys.time() - start_time, 2), "secondi\n")
+
+# ==============================================================================
+# ESTRAZIONE CAMPIONI E PLOT
+# ==============================================================================
+idx_thin <- seq(burn_in + 1, n_iter, by = thin_step)
+
+samples_sigma2_err_thin <- samples_sigma2_err[idx_thin]
+samples_sigma2_spaz_thin <- samples_sigma2_spaz[idx_thin]
+samples_phi_thin <- samples_phi[idx_thin]
+
+par(mfrow = c(2, 2))
+acf(samples_phi_thin, main = "ACF (phi) - Modello Ibrido Veloce")
+plot(idx_thin, samples_sigma2_err_thin, type = "l", col = "grey30", main = "Varianza Errore", ylim = c(0.05, 0.2))
+abline(h = sigma2_errore_true, col = "red", lwd = 2)
+plot(idx_thin, samples_sigma2_spaz_thin, type = "l", col = "darkorange", main = "Varianza Spaziale\n(Campionamento Diretto!)", ylim = c(1.0, 3.5))
+abline(h = sigma2_spaziale_true, col = "red", lwd = 2)
+plot(idx_thin, samples_phi_thin, type = "l", col = "cyan4", main = "Decadimento Spaziale", ylim = c(0.5, 2.0))
+abline(h = phi_true, col = "red", lwd = 2)
 
 # ==============================================================================
 # ESTRAZIONE CAMPIONI E DIAGNOSTICA VISIVA AVANZATA (ZOOM E DENSITA')
