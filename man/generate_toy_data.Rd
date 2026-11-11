@@ -7,12 +7,12 @@
 generate_toy_data(
   mesh,
   num_year = 10,
-  a_prior_mean = 0,
-  a_prior_sd = 10,
   mu_prior_mean = 0,
   Q_mu = 1,
   tau = 1,
   k = 1,
+  gamma = 1,
+  theta = 0,
   sigma_e = 0.1,
   seed = NULL
 )
@@ -22,17 +22,17 @@ generate_toy_data(
 
 \item{num_year}{Integer. The number of years (M) to simulate. Default is 10.}
 
-\item{a_prior_mean}{Numeric scalar. Mean of the prior for the global temporal effects a_i. Default is 0.0.}
-
-\item{a_prior_sd}{Numeric scalar. Standard deviation of the prior for a_i. Default is 10.0.}
-
 \item{mu_prior_mean}{Numeric scalar or vector. Mean of the independent prior for the mu field. Default is 0.0.}
 
-\item{Q_mu}{Sparse matrix. The precision matrix for mu. Default is 1.0 (Scalar values imply diagonal matrices).}
+\item{Q_mu}{Sparse matrix or scalar. The precision matrix for mu. Default is 1.0.}
 
 \item{tau}{Numeric scalar. SPDE precision parameter. Default is 1.0.}
 
-\item{k}{Numeric scalar. SPDE geometric reaction parameter. Default is 1.0.}
+\item{k}{Numeric scalar. SPDE spatial scale parameter (kappa). Default is 1.0.}
+
+\item{gamma}{Numeric scalar. Anisotropy ratio parameter. Default is 1.0 (Isotropic).}
+
+\item{theta}{Numeric scalar. Anisotropy rotation angle in radians. Default is 0.0.}
 
 \item{sigma_e}{Numeric scalar. Standard deviation of observation noise. Default is 0.1.}
 
@@ -41,23 +41,21 @@ generate_toy_data(
 \value{
 A list containing the observations and the exact ground truth components:
 \itemize{
-\item \code{y_mat}: A matrix of observations (num_year x N).
-\item \code{a_true}: A vector of the global temporal effects (length num_year).
+\item \code{y_mat}: A matrix of observations (N x num_year).
 \item \code{mu_true}: A vector of the long-term spatial mean field (length N).
-\item \code{beta_tilde_mat}: A matrix of the zero-mean spatial anomalies (num_year x N).
-\item \code{latent_field_mat}: A matrix of the true latent field without noise (num_year x N).
+\item \code{beta_mat}: A matrix of the true spatial latent fields (N x num_year).
 }
 }
 \description{
 This function generates synthetic spatial data on a 2D mesh domain for multiple years,
-following the exact model formulation:
-Y_i = a_i + mu + beta_tilde_i + epsilon_i
+following the identifiable model formulation:
+Y_{t} = beta_{t} + epsilon_{t}
 
-Where for each year i = 1, ..., num_year:
+Where for each year t = 1, ..., num_year:
 \itemize{
-\item a_i is the global temporal effect for year i, drawn from Normal(a_prior_mean, a_prior_sd^2).
-\item mu is the long-term average temperature field (constant across years), drawn from Normal(mu_prior_mean, Q_mu^-1).
-\item beta_tilde_i is the zero-mean spatially correlated anomaly for year i, drawn via SPDE precision Q(tau, h1, h2).
-\item epsilon_i is the unstructured measurement error for year i.
+\item mu is the long-term average temperature field, drawn from Normal(mu_prior_mean, Q_mu^-1).
+\item beta_{t} is the spatially correlated latent field for year t, drawn from Normal(mu, Q_beta^-1).
+\item Q_beta is the anisotropic SPDE precision matrix governed by tau, k (kappa), gamma, and theta.
+\item epsilon_{t} is the unstructured measurement error (Gaussian white noise).
 }
 }

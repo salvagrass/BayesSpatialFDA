@@ -68,3 +68,53 @@ sample_normal_vector <- function(mean, mat, N = NULL, is_precision = FALSE) {
   }
   return(samples)
 }
+
+
+#' Plot a continuous SPDE spatial field using mesh and 1st-order FEM basis functions
+#'
+#' @description Interpolates and plots a continuous spatial map from mesh vertex values.
+#' @param mesh The mesh object created with fmesher.
+#' @param beta_vector Numeric vector containing values associated with the mesh vertices (e.g., posterior mean).
+#' @param main_title Title of the plot.
+#' @param resolution Resolution of the interpolation grid (default 100x100).
+#' @return None. Displays a continuous thermal image plot.
+plot_spde_field <- function(
+  mesh,
+  beta_vector,
+  main_title = "Spatial Field",
+  resolution = 100
+) {
+  # Extract spatial boundaries directly from the mesh
+  xmin <- min(mesh$loc[, 1])
+  xmax <- max(mesh$loc[, 1])
+  ymin <- min(mesh$loc[, 2])
+  ymax <- max(mesh$loc[, 2])
+
+  # Create a dense grid for continuous spatial interpolation
+  grid_coords <- expand.grid(
+    x = seq(xmin, xmax, length.out = resolution),
+    y = seq(ymin, ymax, length.out = resolution)
+  )
+
+  # Project vertex values onto the continuous grid using 1st-order FEM basis functions
+  proj_vals <- fm_evaluate(
+    mesh,
+    loc = as.matrix(grid_coords),
+    field = beta_vector
+  )
+  z_matrix <- matrix(proj_vals, nrow = resolution, ncol = resolution)
+
+  # Setup color palette and render image
+  col_palette <- hcl.colors(100, palette = "Spectral", rev = TRUE)
+
+  image(
+    seq(xmin, xmax, length.out = resolution),
+    seq(ymin, ymax, length.out = resolution),
+    z_matrix,
+    col = col_palette,
+    asp = 1,
+    main = main_title,
+    xlab = "X",
+    ylab = "Y"
+  )
+}
