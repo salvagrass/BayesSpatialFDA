@@ -1,105 +1,124 @@
-#include <RcppArmadillo.h>
-// [[Rcpp::depends(RcppArmadillo)]]
+#include <RcppEigen.h>
+#include <vector>
+#include <numeric>
+#include <cmath>
+#include <algorithm>
+
+// [[Rcpp::depends(RcppEigen)]]
 
 using namespace Rcpp;
+using namespace Eigen;
 
-// MODULO 1: Ricerca Vicini e Caching delle Distanze (Sostituisce build_nngp_neighbors)
+// MODULO 1: Ricerca Vicini On-the-fly
 // [[Rcpp::export]]
-List build_nngp_neighbors_cpp(arma::mat coords_ord, int m) {
-  int N = coords_ord.n_rows;
-
-  // Matrici per indici e distanze con NA
+List build_nngp_neighbors_cpp(MatrixXd coords_ord, int m) {
+  int N = coords_ord.rows();
   IntegerMatrix nn_idx(N, m);
-  NumericMatrix nn_dist(N, m);
   std::fill(nn_idx.begin(), nn_idx.end(), NA_INTEGER);
-  std::fill(nn_dist.begin(), nn_dist.end(), NA_REAL);
-
-  List nn_dist_matrix(N);
-  nn_dist_matrix[0] = arma::mat(1, 1, arma::fill::zeros);
 
   for (int i = 1; i < N; i++) {
     int num_neighbors = std::min(m, i);
-    arma::vec dists(i);
+    std::vector<double> dists(i);
 
-    // Calcolo distanze dal punto i a tutti i punti precedenti
     for (int j = 0; j < i; j++) {
       dists[j] = std::sqrt(std::pow(coords_ord(j, 0) - coords_ord(i, 0), 2) +
         std::pow(coords_ord(j, 1) - coords_ord(i, 1), 2));
     }
 
-    // Trova i vicini più prossimi
-    arma::uvec sort_idx = arma::sort_index(dists);
-    arma::uvec nearest = sort_idx.head(num_neighbors);
+    std::vector<int> sort_idx(i);
+    std::iota(sort_idx.begin(), sort_idx.end(), 0);
+    std::sort(sort_idx.begin(), sort_idx.end(), [&dists](int a, int b) {
+      return dists[a] < dists[b];
+    });
 
-    arma::mat coords_neigh(num_neighbors, 2);
     for (int k = 0; k < num_neighbors; k++) {
-      int n_idx = nearest[k];
-      nn_idx(i, k) = n_idx + 1; // +1 per indici 1-based di R
-      nn_dist(i, k) = dists[n_idx];
-      coords_neigh(k, 0) = coords_ord(n_idx, 0);
-      coords_neigh(k, 1) = coords_ord(n_idx, 1);
+      nn_idx(i, k) = sort_idx[k] + 1;
     }
-
-    // Caching delle distanze reciproche TRA i vicini
-    arma::mat dist_mat(num_neighbors, num_neighbors, arma::fill::zeros);
-    if (num_neighbors > 1) {
-      for (int r = 0; r < num_neighbors; r++) {
-        for (int c = r + 1; c < num_neighbors; c++) {
-          double d = std::sqrt(std::pow(coords_neigh(r, 0) - coords_neigh(c, 0), 2) +
-                               std::pow(coords_neigh(r, 1) - coords_neigh(c, 1), 2));
-          dist_mat(r, c) = d;
-          dist_mat(c, r) = d;
-        }
-      }
-    }
-    nn_dist_matrix[i] = dist_mat;
   }
-
-  return List::create(
-    Named("nn_idx") = nn_idx,
-    Named("nn_dist") = nn_dist,
-    Named("nn_dist_matrix") = nn_dist_matrix
-  );
+  return List::create(Named("nn_idx") = nn_idx);
 }
 
-// MODULO 2: Costruzione Veloce della Matrice di Precisione
+// MODULO 2: Costruzione Precisione (Eigen LLT Ultra-Veloce)
 // [[Rcpp::export]]
-List build_precision_vectors_cpp(int N, IntegerMatrix nn_idx, List nn_dist_matrix,
-                                 NumericMatrix nn_dist, double sigma2, double phi) {
+List build_precision_vectors_cpp(int N, MatrixXd coords_ord, IntegerMatrix nn_idx,
+                                 double sigma2, double phi) {
 
-  std::vector<int> i_vec; std::vector<int> j_vec; std::vector<double> x_vec;
-  i_vec.reserve(N * 15); j_vec.reserve(N * 15); x_vec.reserve(N * 15);
+  int max_nn = nn_idx.ncol();
+  std::vector<int> nn_counts(N, 0);
+  std::vector<int> start_idx(N, 0);
 
-  NumericVector F_vec(N);
-  F_vec[0] = sigma2;
-  i_vec.push_back(1); j_vec.push_back(1); x_vec.push_back(1.0);
+  // Trasferiamo la IntegerMatrix di R in un std::vector C++ nativo
+  std::vector<int> nn_idx_std(N * max_nn, -1);
+  for(int i = 0; i < N; i++) {
+    for(int k = 0; k < max_nn; k++) {
+      if (!IntegerVector::is_na(nn_idx(i, k))) {
+        nn_idx_std[i * max_nn + k] = nn_idx(i, k);
+      }
+    }
+  }
 
-  for (int i = 1; i < N; i++) {
-    int num_neigh = 0;
-    for (int k = 0; k < nn_idx.ncol(); k++) {
-      if (!IntegerVector::is_na(nn_idx(i, k))) num_neigh++;
+  // Pre-allocazione precisa
+  int total_elements = 1;
+  for(int i = 1; i < N; i++) {
+    int c = 0;
+    for(int k = 0; k < max_nn; k++) {
+      if(nn_idx_std[i * max_nn + k] != -1) c++;
       else break;
     }
+    nn_counts[i] = c;
+    start_idx[i] = total_elements;
+    total_elements += (1 + c);
+  }
 
-    arma::uvec neigh(num_neigh);
-    arma::vec dist_i_neigh(num_neigh);
-    for (int k = 0; k < num_neigh; k++) {
-      neigh[k] = nn_idx(i, k);
-      dist_i_neigh[k] = nn_dist(i, k);
+  std::vector<int> i_vec(total_elements);
+  std::vector<int> j_vec(total_elements);
+  std::vector<double> x_vec(total_elements);
+  VectorXd F_vec(N);
+
+  F_vec[0] = sigma2;
+  i_vec[0] = 1; j_vec[0] = 1; x_vec[0] = 1.0;
+
+  // Ciclo Veloce e Stabile
+  for (int i = 1; i < N; i++) {
+    int c = nn_counts[i];
+    int s = start_idx[i];
+
+    MatrixXd coords_neigh(c, 2);
+    VectorXd dist_i_neigh(c);
+
+    for(int k = 0; k < c; k++) {
+      int n_idx = nn_idx_std[i * max_nn + k] - 1;
+      coords_neigh(k, 0) = coords_ord(n_idx, 0);
+      coords_neigh(k, 1) = coords_ord(n_idx, 1);
+
+      dist_i_neigh[k] = std::sqrt(std::pow(coords_ord(i, 0) - coords_ord(n_idx, 0), 2) +
+        std::pow(coords_ord(i, 1) - coords_ord(n_idx, 1), 2));
     }
 
-    NumericMatrix dist_mat_R = nn_dist_matrix[i];
-    arma::mat dist_neigh = as<arma::mat>(dist_mat_R);
+    MatrixXd dist_neigh = MatrixXd::Zero(c, c);
+    for(int r = 0; r < c; r++){
+      for(int col = r + 1; col < c; col++){
+        double d = std::sqrt(std::pow(coords_neigh(r, 0) - coords_neigh(col, 0), 2) +
+                             std::pow(coords_neigh(r, 1) - coords_neigh(col, 1), 2));
+        dist_neigh(r, col) = d;
+        dist_neigh(col, r) = d;
+      }
+    }
 
-    arma::mat C_neigh = sigma2 * arma::exp(-phi * dist_neigh);
-    arma::vec c_cross = sigma2 * arma::exp(-phi * dist_i_neigh);
+    MatrixXd C_neigh = sigma2 * (-phi * dist_neigh.array()).exp();
+    VectorXd c_cross = sigma2 * (-phi * dist_i_neigh.array()).exp();
 
-    arma::vec B_i = arma::solve(C_neigh, c_cross);
-    F_vec[i] = sigma2 - arma::dot(c_cross, B_i);
+    VectorXd B_i = C_neigh.llt().solve(c_cross);
+    F_vec[i] = sigma2 - c_cross.dot(B_i);
 
-    i_vec.push_back(i + 1); j_vec.push_back(i + 1); x_vec.push_back(1.0);
-    for(int k = 0; k < num_neigh; k++) {
-      i_vec.push_back(i + 1); j_vec.push_back(neigh[k]); x_vec.push_back(-B_i[k]);
+    i_vec[s] = i + 1;
+    j_vec[s] = i + 1;
+    x_vec[s] = 1.0;
+
+    for(int k = 0; k < c; k++) {
+      i_vec[s + 1 + k] = i + 1;
+      j_vec[s + 1 + k] = nn_idx_std[i * max_nn + k];
+      x_vec[s + 1 + k] = -B_i[k];
     }
   }
 
