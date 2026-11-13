@@ -1,2 +1,4 @@
 .Rproj.user
 .vscode/
+.DS_Store
+.Rhistory
