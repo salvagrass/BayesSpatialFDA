@@ -41,11 +41,10 @@ curr_beta <- matrix(0, nrow = N, ncol = M)
 curr_sigma2_err <- 1.0
 curr_sigma2_spaz <- 0.5
 curr_phi <- 0.5
-prior_mu_prec <- Diagonal(N, 1e-4)
+prior_mu_prec_scalar <- 1e-4
 
 R_phi <- build_nngp_precision(nngp_struct, 1.0, curr_phi)
 ldet_R_curr <- attr(R_phi, "log_det")
-Q_nngp <- R_phi / curr_sigma2_spaz
 
 prop_var_phi <- 0.05
 n_acc_phi <- 0
@@ -57,53 +56,52 @@ start_time <- Sys.time()
 
 for (iter in 1:n_iter) {
 
-  # STEP 1: mu
-  Q_post_mu <- Diagonal(N, M / curr_sigma2_err) + prior_mu_prec
-  sum_residui_mu <- rowSums(Y_mat - curr_beta)
-  b_post_mu <- sum_residui_mu / curr_sigma2_err
-  curr_mu <- rnorm(N, mean = as.vector(b_post_mu / diag(Q_post_mu)), sd = sqrt(1 / diag(Q_post_mu)))
+  # STEP 1: mu (Vettorizzato senza allocazione di matrici S4 diagonali)
+  prec_post_mu <- (M / curr_sigma2_err) + prior_mu_prec_scalar
+  b_post_mu <- rowSums(Y_mat - curr_beta) / curr_sigma2_err
+  curr_mu <- rnorm(N, mean = b_post_mu / prec_post_mu, sd = sqrt(1 / prec_post_mu))
 
-  # STEP 2: beta (Vettorizzato su dsCMatrix simmetrica)
-  Q_post_beta <- Q_nngp + Diagonal(N, 1 / curr_sigma2_err)
-  chol_Q_beta <- chol(Q_post_beta)
-  b_post_beta_mat <- (Y_mat - curr_mu) / curr_sigma2_err
-  mean_beta_post_mat <- as.matrix(solve(chol_Q_beta, solve(t(chol_Q_beta), b_post_beta_mat)))
-  curr_beta <- as.matrix(mean_beta_post_mat + solve(chol_Q_beta, matrix(rnorm(N * M), nrow = N, ncol = M)))
+  # STEP 2: beta (Risoluzione C++ SimplicialLLT con fattorizzazione simbolica fissa)
+  Z_norm <- matrix(rnorm(N * M), nrow = N, ncol = M)
+  curr_beta <- sample_beta_cpp(R_phi, curr_sigma2_spaz, curr_sigma2_err, Y_mat - curr_mu, Z_norm)
 
   # STEP 3: Varianza Errore
   eps_mat <- Y_mat - curr_mu - curr_beta
   curr_sigma2_err <- 1 / rgamma(1, shape = (N * M) / 2 + 0.01, rate = sum(eps_mat^2) / 2 + 0.01)
 
-  # STEP 4: Varianza Spaziale (Gibbs Coniugato)
-  quad_R_phi <- sum(curr_beta * (R_phi %*% curr_beta))
+  # STEP 4: Varianza Spaziale (Gibbs Coniugato con forma quadratica C++)
+  quad_R_phi <- quad_form_cpp(R_phi, curr_beta)
   shape_spaz <- (N * M) / 2 + 0.01
   rate_spaz  <- quad_R_phi / 2 + 0.01
   curr_sigma2_spaz <- 1 / rgamma(1, shape = shape_spaz, rate = rate_spaz)
-  Q_nngp <- R_phi / curr_sigma2_spaz
 
-  # STEP 5: METROPOLIS per PHI (Con log-determinante analitico O(N) gratuito!)
+  # STEP 5: METROPOLIS Lazy per PHI (assembla R_phi SOLO se accettato!)
   log_phi_prop <- rnorm(1, mean = log(curr_phi), sd = sqrt(prop_var_phi))
   phi_prop <- exp(log_phi_prop)
 
-  R_phi_prop <- build_nngp_precision(nngp_struct, 1.0, phi_prop)
-  ldet_R_prop <- attr(R_phi_prop, "log_det")
+  cpp_prop <- eval_nngp_proposal_cpp(
+    N = as.integer(N),
+    coords_ord = nngp_struct$coords_ord,
+    nn_idx = nngp_struct$nn_idx,
+    ord = nngp_struct$ord_indices,
+    sigma2 = 1.0,
+    phi = phi_prop,
+    beta = curr_beta
+  )
 
-  # Nota: il termine -N*log(curr_sigma2_spaz) si cancella esattamente tra curr e prop,
-  # ma lo includiamo per identità numerica assoluta col tuo script originale
   ldet_curr <- ldet_R_curr - N * log(curr_sigma2_spaz)
-  ldet_prop <- ldet_R_prop - N * log(curr_sigma2_spaz)
+  ldet_prop <- cpp_prop$log_det - N * log(curr_sigma2_spaz)
 
   quad_curr <- quad_R_phi / curr_sigma2_spaz
-  quad_prop <- sum(curr_beta * (R_phi_prop %*% curr_beta)) / curr_sigma2_spaz
+  quad_prop <- cpp_prop$quad_form / curr_sigma2_spaz
 
   ll_curr <- 0.5 * M * ldet_curr - 0.5 * quad_curr
   ll_prop <- 0.5 * M * ldet_prop - 0.5 * quad_prop
 
   if (log(runif(1)) < (ll_prop + dnorm(log_phi_prop, 0, 5, log = TRUE) - ll_curr - dnorm(log(curr_phi), 0, 5, log = TRUE))) {
     curr_phi <- phi_prop
-    R_phi <- R_phi_prop
-    ldet_R_curr <- ldet_R_prop
-    Q_nngp <- R_phi / curr_sigma2_spaz
+    R_phi <- assemble_nngp_precision(cpp_prop, N)
+    ldet_R_curr <- cpp_prop$log_det
     n_acc_phi <- n_acc_phi + 1
     if (iter > burn_in) n_acc_total <- n_acc_total + 1
   }

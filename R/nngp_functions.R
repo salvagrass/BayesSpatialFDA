@@ -12,41 +12,37 @@ build_nngp_neighbors <- function(coords, m = 15) {
 
   return(list(
     coords_ord = coords_ord,
-    ord_indices = ord,
+    ord_indices = as.integer(ord),
     nn_idx = cpp_res$nn_idx,
     m = m
   ))
 }
 
+# Assembla la matrice sparsa solo quando necessario (inizializzazione o accettazione Metropolis)
+assemble_nngp_precision <- function(cpp_results, N) {
+  B_scaled <- Matrix::sparseMatrix(
+    i = cpp_results$i_vec,
+    j = cpp_results$j_vec,
+    x = cpp_results$x_vec,
+    dims = c(N, N)
+  )
+  # Restituisce dgCMatrix già nell'ordine originale dei nodi (zero permutazioni inv_ord)
+  Q_out <- Matrix::t(B_scaled) %*% B_scaled
+  attr(Q_out, "log_det") <- cpp_results$log_det
+  return(Q_out)
+}
+
 build_nngp_precision <- function(nngp_struct, sigma2, phi) {
   N <- nrow(nngp_struct$coords_ord)
 
-  # Generazione Vettori in C++ (On-the-fly)
   cpp_results <- build_precision_vectors_cpp(
     N = as.integer(N),
     coords_ord = as.matrix(nngp_struct$coords_ord),
     nn_idx = nngp_struct$nn_idx,
+    ord = nngp_struct$ord_indices,
     sigma2 = as.numeric(sigma2),
     phi = as.numeric(phi)
   )
 
-  # Assemblaggio Sparso: B_scaled = F^{-1/2} * B_nngp
-  B_nngp <- Matrix::sparseMatrix(
-    i = cpp_results$i_vec, j = cpp_results$j_vec, x = cpp_results$x_vec, dims = c(N, N)
-  )
-  B_scaled <- Matrix::Diagonal(x = 1 / sqrt(cpp_results$F_vec)) %*% B_nngp
-
-  # crossprod restituisce direttamente B^T * F^{-1} * B
-  Q_nngp <- Matrix::crossprod(B_scaled)
-
-  ord <- nngp_struct$ord_indices
-  inv_ord <- order(ord)
-
-  # Forziamo la classe simmetrica dsCMatrix dopo il riordinamento per velocizzare chol()
-  Q_out <- Matrix::forceSymmetric(Q_nngp[inv_ord, inv_ord], uplo = "U")
-
-  # Log-determinante analitico O(N) gratuito: log|det(Q)| = -sum(log(F_i))
-  attr(Q_out, "log_det") <- -sum(log(cpp_results$F_vec))
-
-  return(Q_out)
+  return(assemble_nngp_precision(cpp_results, N))
 }

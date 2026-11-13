@@ -8,11 +8,10 @@ log_marg_likelihood_robust <- function(sig2_spaz, phi, sig2_err, Y_mat, curr_mu,
   M <- ncol(Y_mat)
 
   Q_spaz <- build_nngp_precision(nngp_struct, sig2_spaz, phi)
-  Q_post <- Q_spaz + Diagonal(N, 1 / sig2_err)
+  Q_post <- Matrix::forceSymmetric(Q_spaz + Diagonal(N, 1 / sig2_err), uplo = "U")
 
   chol_Q_post <- chol(Q_post)
 
-  # Log-determinanti istantanei senza fattorizzazioni aggiuntive
   ldet_Q_spaz <- attr(Q_spaz, "log_det")
   ldet_Q_post <- 2 * sum(log(Matrix::diag(chol_Q_post)))
 
