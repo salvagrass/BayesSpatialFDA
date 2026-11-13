@@ -1,5 +1,17 @@
+# SEQUENZA DI COMANDI DA LANCIARE IN CONSOLE (NON LANCIARE LO SCRIPT)
+# rm(list = ls())
+# setwd("~/Desktop/Progetto_Bayesian/BayesSpatialFDA/experiments")
+# library(Matrix)
+# library(MASS)
+# library(Rcpp)
+# library(RcppEigen)
+# Rcpp::sourceCpp("../R/nngp_cpp.cpp")
+# source("../R/nngp_functions.R")
+# source("../R/nngp_marginal.R")
+# source("test_nngp_marginal.R")
+
 # ==============================================================================
-# PROGETTO BAYESIANO: NNGP IBRIDO GIBBS/METROPOLIS (ALTA VELOCITA')
+# PROGETTO BAYESIANO: NNGP IBRIDO GIBBS/METROPOLIS (COMPLETO DI TUTTE LE TAVOLE)
 # ==============================================================================
 
 library(Matrix)
@@ -17,12 +29,18 @@ M <- 25
 sigma2_spaziale_true <- 2.0
 phi_true <- 1.2
 sigma2_errore_true <- 0.1
-mu_true <- MASS::mvrnorm(1, mu = rep(15.0, N), Sigma = sigma2_spaziale_true * exp(-phi_true * as.matrix(dist(coords))))
+Sigma_true <- sigma2_spaziale_true * exp(-phi_true * as.matrix(dist(coords)))
+mu_true <- MASS::mvrnorm(1, mu = rep(15.0, N), Sigma = Sigma_true)
 
+beta_true_raw <- matrix(NA, nrow = N, ncol = M)
 Y_mat <- matrix(NA, nrow = N, ncol = M)
 for (i in 1:M) {
-  Y_mat[, i] <- mu_true + MASS::mvrnorm(1, mu = rep(0, N), Sigma = sigma2_spaziale_true * exp(-phi_true * as.matrix(dist(coords)))) + rnorm(N, 0, sqrt(sigma2_errore_true))
+  beta_true_raw[, i] <- MASS::mvrnorm(1, mu = rep(0, N), Sigma = Sigma_true)
+  Y_mat[, i] <- mu_true + beta_true_raw[, i] + rnorm(N, 0, sqrt(sigma2_errore_true))
 }
+
+# Anomalia vera centrata per identificabilità rispetto alla media locale mu_i
+beta_true <- beta_true_raw - rowMeans(beta_true_raw)
 
 nngp_struct <- build_nngp_neighbors(coords, m = 10)
 
@@ -35,6 +53,11 @@ samples_mu <- matrix(0, nrow = n_iter, ncol = N)
 samples_sigma2_err <- numeric(n_iter)
 samples_sigma2_spaz <- numeric(n_iter)
 samples_phi <- numeric(n_iter)
+
+# Accumulatori Online (Welford) per Media e Varianza a Posteriori delle Anomalie Beta
+beta_post_mean <- matrix(0, nrow = N, ncol = M)
+beta_M2        <- matrix(0, nrow = N, ncol = M)
+n_thin_beta    <- 0
 
 curr_mu <- rep(mean(Y_mat), N)
 curr_beta <- matrix(0, nrow = N, ncol = M)
@@ -56,7 +79,7 @@ start_time <- Sys.time()
 
 for (iter in 1:n_iter) {
 
-  # STEP 1: mu (Vettorizzato senza allocazione di matrici S4 diagonali)
+  # STEP 1: mu
   prec_post_mu <- (M / curr_sigma2_err) + prior_mu_prec_scalar
   b_post_mu <- rowSums(Y_mat - curr_beta) / curr_sigma2_err
   curr_mu <- rnorm(N, mean = b_post_mu / prec_post_mu, sd = sqrt(1 / prec_post_mu))
@@ -69,13 +92,13 @@ for (iter in 1:n_iter) {
   eps_mat <- Y_mat - curr_mu - curr_beta
   curr_sigma2_err <- 1 / rgamma(1, shape = (N * M) / 2 + 0.01, rate = sum(eps_mat^2) / 2 + 0.01)
 
-  # STEP 4: Varianza Spaziale (Gibbs Coniugato con forma quadratica C++)
+  # STEP 4: Varianza Spaziale (Gibbs Coniugato)
   quad_R_phi <- quad_form_cpp(R_phi, curr_beta)
   shape_spaz <- (N * M) / 2 + 0.01
   rate_spaz  <- quad_R_phi / 2 + 0.01
   curr_sigma2_spaz <- 1 / rgamma(1, shape = shape_spaz, rate = rate_spaz)
 
-  # STEP 5: METROPOLIS Lazy per PHI (assembla R_phi SOLO se accettato!)
+  # STEP 5: METROPOLIS Lazy per PHI
   log_phi_prop <- rnorm(1, mean = log(curr_phi), sd = sqrt(prop_var_phi))
   phi_prop <- exp(log_phi_prop)
 
@@ -117,19 +140,34 @@ for (iter in 1:n_iter) {
   samples_sigma2_spaz[iter] <- curr_sigma2_spaz
   samples_phi[iter] <- curr_phi
 
+  # Aggiornamento Online di Media e Varianza dell'Anomalia Centrata
+  if (iter > burn_in && (iter - burn_in) %% thin_step == 0) {
+    n_thin_beta <- n_thin_beta + 1
+    curr_beta_anom <- curr_beta - rowMeans(curr_beta)
+    delta_beta <- curr_beta_anom - beta_post_mean
+    beta_post_mean <- beta_post_mean + delta_beta / n_thin_beta
+    beta_M2 <- beta_M2 + delta_beta * (curr_beta_anom - beta_post_mean)
+  }
+
   setTxtProgressBar(pb, iter)
 }
 close(pb)
 elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
 cat(sprintf("\nTempo totale: %.2f secondi (%.2f minuti)\n", elapsed_sec, elapsed_sec / 60))
 
+# Matrici N x M di Varianza e Deviazione Standard a posteriori delle anomalie Beta
+beta_post_var <- (beta_M2 / (n_thin_beta - 1)) * (M / (M - 1))
+beta_post_sd  <- sqrt(beta_post_var)
+beta_node_sd  <- sqrt(rowMeans(beta_post_var))
+
 # ==============================================================================
-# DIAGNOSTICA NUMERICHE E GRAFICHE POST-MCMC
+# DIAGNOSTICA NUMERICHE POST-MCMC
 # ==============================================================================
 idx_thin <- seq(burn_in + 1, n_iter, by = thin_step)
 samples_sigma2_err_thin <- samples_sigma2_err[idx_thin]
 samples_sigma2_spaz_thin <- samples_sigma2_spaz[idx_thin]
 samples_phi_thin <- samples_phi[idx_thin]
+Y_centered_obs <- Y_mat - rowMeans(Y_mat)
 
 calc_ess <- function(x) {
   n <- length(x)
@@ -150,15 +188,32 @@ summary_tab <- data.frame(
   ESS       = round(c(calc_ess(samples_sigma2_spaz_thin), calc_ess(samples_phi_thin), calc_ess(samples_sigma2_err_thin)), 1)
 )
 
+rmse_beta  <- sqrt(mean((beta_post_mean - beta_true)^2))
+cor_beta   <- cor(as.vector(beta_post_mean), as.vector(beta_true))
+ci95_low   <- beta_post_mean - 1.96 * beta_post_sd
+ci95_high  <- beta_post_mean + 1.96 * beta_post_sd
+cov95_beta <- 100 * mean(beta_true >= ci95_low & beta_true <= ci95_high)
+
 cat("\n====================================================================\n")
 cat(" RIASSUNTO POSTERIORE E DIAGNOSTICA MCMC (N_thin =", length(idx_thin), ")\n")
 cat("====================================================================\n")
 print(summary_tab, row.names = FALSE, digits = 4)
 cat(sprintf("Tasso di accettazione post burn-in (phi): %.2f%%\n", 100 * n_acc_total / (n_iter - burn_in)))
+cat("--------------------------------------------------------------------\n")
+cat(" ANALISI A POSTERIORI DEL CAMPO LATENTE BETA (Matrice N x M = 400 x 25)\n")
+cat("--------------------------------------------------------------------\n")
+cat(sprintf("Correlazione col Vero  : R = %.4f | RMSE Globale = %.4f\n", cor_beta, rmse_beta))
+cat(sprintf("Varianza Var(Beta | Y) : Media = %.4f | Min (centro) = %.4f | Max (bordi) = %.4f\n",
+            mean(beta_post_var), min(beta_node_sd^2), max(beta_node_sd^2)))
+cat(sprintf("Dev. Std SD(Beta | Y)  : Media = %.4f | Min (centro) = %.4f | Max (bordi) = %.4f\n",
+            mean(beta_node_sd), min(beta_node_sd), max(beta_node_sd)))
+cat(sprintf("Copertura IC 95%%       : %.2f%%\n", cov95_beta))
 cat("====================================================================\n")
 
-# PLOT E DIAGNOSTICA
-par(mfrow = c(3, 2), mar = c(4, 4, 3, 1))
+# ==============================================================================
+# TAVOLA GRAFICA 1 (3x2): TRACEPLOT E DENSITA' PARAMETRI GLOBALI
+# ==============================================================================
+par(mfrow = c(3, 2), pty = "m", mar = c(4, 4, 3, 1))
 
 ylim_spaz <- range(c(samples_sigma2_spaz_thin, sigma2_spaziale_true))
 plot(idx_thin, samples_sigma2_spaz_thin, type = "l", col = "darkorange",
@@ -187,4 +242,67 @@ plot(density(samples_sigma2_err_thin), col = "grey30", lwd = 2, main = "Densità
 abline(v = sigma2_errore_true, col = "red", lwd = 2, lty = 2)
 abline(v = quantile(samples_sigma2_err_thin, probs = c(0.025, 0.975)), col = "grey30", lty = 3)
 
-par(mfrow = c(1, 1))
+# ==============================================================================
+# TAVOLA GRAFICA 2 (1x2): CURVA TEMPORALE BETA E RECUPERO GLOBALE
+# ==============================================================================
+par(mfrow = c(1, 2), pty = "m", mar = c(4, 4, 3, 1.5))
+
+sito_centro <- which.min((coords[, 1] - 2.5)^2 + (coords[, 2] - 2.5)^2)
+y_centr <- Y_centered_obs[sito_centro, ]
+m_c <- beta_post_mean[sito_centro, ]
+s_c <- beta_post_sd[sito_centro, ]
+ylim_c <- range(c(y_centr, beta_true[sito_centro, ], m_c - 2 * s_c, m_c + 2 * s_c))
+
+plot(1:M, beta_true[sito_centro, ], type = "l", lwd = 2, col = "black", ylim = ylim_c,
+     xlab = "Anno / Tempo (j = 1..M)", ylab = expression(beta[ij]), cex.main = 0.95,
+     main = paste0("Curva Beta - Nodo Centrale (SD = ", round(mean(s_c), 3), ")"))
+polygon(c(1:M, M:1), c(m_c + 2 * s_c, rev(m_c - 2 * s_c)), col = rgb(0.1, 0.5, 0.8, 0.20), border = NA)
+polygon(c(1:M, M:1), c(m_c + s_c, rev(m_c - s_c)), col = rgb(0.1, 0.5, 0.8, 0.35), border = NA)
+lines(1:M, m_c, col = "dodgerblue4", lwd = 2, lty = 2)
+points(1:M, y_centr, pch = 16, cex = 0.7, col = "firebrick")
+legend("topright", legend = c("Beta Vero", "E[Beta|Y]", "+/- 1 SD", "+/- 2 SD", "Y centrato"),
+       col = c("black", "dodgerblue4", rgb(0.1, 0.5, 0.8, 0.45), rgb(0.1, 0.5, 0.8, 0.25), "firebrick"),
+       lty = c(1, 2, NA, NA, NA), pch = c(NA, NA, 15, 15, 16), lwd = 2, bty = "n", cex = 0.75)
+
+plot(as.vector(beta_true), as.vector(beta_post_mean), pch = 16, cex = 0.3, col = rgb(0, 0.4, 0.8, 0.3),
+     xlab = "True Anomaly (Beta Vero)", ylab = "Posterior Mean E[Beta | Y]", cex.main = 0.95,
+     main = paste0("Recupero Globale Anomalie Beta (R = ", round(cor_beta, 3), ")"))
+abline(0, 1, col = "red", lwd = 2)
+
+# ==============================================================================
+# TAVOLA GRAFICA 3 (2x2): GRIGLIA 20x20 AUTENTICA SENZA BORDI BIANCHI
+# ==============================================================================
+x_grid <- seq(0, 5, length.out = n_side)
+y_grid <- seq(0, 5, length.out = n_side)
+pal_spaz <- hcl.colors(100, "Spectral", rev = TRUE)
+
+par(mfrow = c(2, 2), pty = "s", mar = c(3.8, 3.8, 2.8, 1.2))
+
+zlim_anom <- range(c(beta_true[, 1], beta_post_mean[, 1]))
+
+# 1. Anomalia Vera (t = 1)
+image(x_grid, y_grid, matrix(beta_true[, 1], nrow = n_side, ncol = n_side),
+      col = pal_spaz, zlim = zlim_anom, xlim = c(0, 5), ylim = c(0, 5),
+      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "True anomaly (t = 1)")
+box()
+
+# 2. Media a Posteriori NNGP (t = 1)
+image(x_grid, y_grid, matrix(beta_post_mean[, 1], nrow = n_side, ncol = n_side),
+      col = pal_spaz, zlim = zlim_anom, xlim = c(0, 5), ylim = c(0, 5),
+      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "Posterior mean NNGP (t = 1)")
+box()
+
+# 3. Deviazione Standard a Posteriori NNGP
+image(x_grid, y_grid, matrix(beta_node_sd, nrow = n_side, ncol = n_side),
+      col = pal_spaz, xlim = c(0, 5), ylim = c(0, 5),
+      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "Posterior SD NNGP")
+box()
+
+# 4. Errore di Stima (Media a Posteriori - Vero, t = 1)
+err_t1 <- beta_post_mean[, 1] - beta_true[, 1]
+image(x_grid, y_grid, matrix(err_t1, nrow = n_side, ncol = n_side),
+      col = pal_spaz, xlim = c(0, 5), ylim = c(0, 5),
+      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "Error (Posterior mean - Truth)")
+box()
+
+par(mfrow = c(1, 1), pty = "m")
