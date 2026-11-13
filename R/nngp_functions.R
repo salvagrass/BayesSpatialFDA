@@ -1,5 +1,4 @@
-# Assicurati di eseguire: install.packages("RcppEigen")
-# Rcpp::sourceCpp("nngp_cpp.cpp")
+# Assicurati di eseguire: Rcpp::sourceCpp("../R/nngp_cpp.cpp")
 
 build_nngp_neighbors <- function(coords, m = 15) {
   N <- nrow(coords)
@@ -22,7 +21,7 @@ build_nngp_neighbors <- function(coords, m = 15) {
 build_nngp_precision <- function(nngp_struct, sigma2, phi) {
   N <- nrow(nngp_struct$coords_ord)
 
-  # Generazione Vettori in C++ (On-the-fly multi-core)
+  # Generazione Vettori in C++ (On-the-fly)
   cpp_results <- build_precision_vectors_cpp(
     N = as.integer(N),
     coords_ord = as.matrix(nngp_struct$coords_ord),
@@ -31,14 +30,23 @@ build_nngp_precision <- function(nngp_struct, sigma2, phi) {
     phi = as.numeric(phi)
   )
 
-  # Assemblaggio Sparso in R
+  # Assemblaggio Sparso: B_scaled = F^{-1/2} * B_nngp
   B_nngp <- Matrix::sparseMatrix(
     i = cpp_results$i_vec, j = cpp_results$j_vec, x = cpp_results$x_vec, dims = c(N, N)
   )
-  F_inv <- Matrix::Diagonal(x = 1 / cpp_results$F_vec)
-  Q_nngp <- Matrix::t(B_nngp) %*% F_inv %*% B_nngp
+  B_scaled <- Matrix::Diagonal(x = 1 / sqrt(cpp_results$F_vec)) %*% B_nngp
+
+  # crossprod restituisce direttamente B^T * F^{-1} * B
+  Q_nngp <- Matrix::crossprod(B_scaled)
 
   ord <- nngp_struct$ord_indices
   inv_ord <- order(ord)
-  return(Q_nngp[inv_ord, inv_ord])
+
+  # Forziamo la classe simmetrica dsCMatrix dopo il riordinamento per velocizzare chol()
+  Q_out <- Matrix::forceSymmetric(Q_nngp[inv_ord, inv_ord], uplo = "U")
+
+  # Log-determinante analitico O(N) gratuito: log|det(Q)| = -sum(log(F_i))
+  attr(Q_out, "log_det") <- -sum(log(cpp_results$F_vec))
+
+  return(Q_out)
 }

@@ -9,7 +9,7 @@
 using namespace Rcpp;
 using namespace Eigen;
 
-// MODULO 1: Ricerca Vicini On-the-fly
+// MODULO 1: Ricerca Vicini On-the-fly (Ottimizzata con partial_sort)
 // [[Rcpp::export]]
 List build_nngp_neighbors_cpp(MatrixXd coords_ord, int m) {
   int N = coords_ord.rows();
@@ -18,18 +18,20 @@ List build_nngp_neighbors_cpp(MatrixXd coords_ord, int m) {
 
   for (int i = 1; i < N; i++) {
     int num_neighbors = std::min(m, i);
-    std::vector<double> dists(i);
+    std::vector<double> dists_sq(i);
 
     for (int j = 0; j < i; j++) {
-      dists[j] = std::sqrt(std::pow(coords_ord(j, 0) - coords_ord(i, 0), 2) +
-        std::pow(coords_ord(j, 1) - coords_ord(i, 1), 2));
+      double dx = coords_ord(j, 0) - coords_ord(i, 0);
+      double dy = coords_ord(j, 1) - coords_ord(i, 1);
+      dists_sq[j] = dx * dx + dy * dy;
     }
 
     std::vector<int> sort_idx(i);
     std::iota(sort_idx.begin(), sort_idx.end(), 0);
-    std::sort(sort_idx.begin(), sort_idx.end(), [&dists](int a, int b) {
-      return dists[a] < dists[b];
-    });
+    std::partial_sort(sort_idx.begin(), sort_idx.begin() + num_neighbors, sort_idx.end(),
+                      [&dists_sq](int a, int b) {
+                        return dists_sq[a] < dists_sq[b];
+                      });
 
     for (int k = 0; k < num_neighbors; k++) {
       nn_idx(i, k) = sort_idx[k] + 1;
@@ -47,7 +49,6 @@ List build_precision_vectors_cpp(int N, MatrixXd coords_ord, IntegerMatrix nn_id
   std::vector<int> nn_counts(N, 0);
   std::vector<int> start_idx(N, 0);
 
-  // Trasferiamo la IntegerMatrix di R in un std::vector C++ nativo
   std::vector<int> nn_idx_std(N * max_nn, -1);
   for(int i = 0; i < N; i++) {
     for(int k = 0; k < max_nn; k++) {
@@ -57,7 +58,6 @@ List build_precision_vectors_cpp(int N, MatrixXd coords_ord, IntegerMatrix nn_id
     }
   }
 
-  // Pre-allocazione precisa
   int total_elements = 1;
   for(int i = 1; i < N; i++) {
     int c = 0;
@@ -78,7 +78,6 @@ List build_precision_vectors_cpp(int N, MatrixXd coords_ord, IntegerMatrix nn_id
   F_vec[0] = sigma2;
   i_vec[0] = 1; j_vec[0] = 1; x_vec[0] = 1.0;
 
-  // Ciclo Veloce e Stabile
   for (int i = 1; i < N; i++) {
     int c = nn_counts[i];
     int s = start_idx[i];
@@ -91,15 +90,17 @@ List build_precision_vectors_cpp(int N, MatrixXd coords_ord, IntegerMatrix nn_id
       coords_neigh(k, 0) = coords_ord(n_idx, 0);
       coords_neigh(k, 1) = coords_ord(n_idx, 1);
 
-      dist_i_neigh[k] = std::sqrt(std::pow(coords_ord(i, 0) - coords_ord(n_idx, 0), 2) +
-        std::pow(coords_ord(i, 1) - coords_ord(n_idx, 1), 2));
+      double dx = coords_ord(i, 0) - coords_ord(n_idx, 0);
+      double dy = coords_ord(i, 1) - coords_ord(n_idx, 1);
+      dist_i_neigh[k] = std::sqrt(dx * dx + dy * dy);
     }
 
     MatrixXd dist_neigh = MatrixXd::Zero(c, c);
     for(int r = 0; r < c; r++){
       for(int col = r + 1; col < c; col++){
-        double d = std::sqrt(std::pow(coords_neigh(r, 0) - coords_neigh(col, 0), 2) +
-                             std::pow(coords_neigh(r, 1) - coords_neigh(col, 1), 2));
+        double dx = coords_neigh(r, 0) - coords_neigh(col, 0);
+        double dy = coords_neigh(r, 1) - coords_neigh(col, 1);
+        double d = std::sqrt(dx * dx + dy * dy);
         dist_neigh(r, col) = d;
         dist_neigh(col, r) = d;
       }

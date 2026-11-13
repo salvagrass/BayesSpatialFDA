@@ -27,7 +27,6 @@ for (i in 1:M) {
 nngp_struct <- build_nngp_neighbors(coords, m = 10)
 
 # SETUP MCMC
-# 50k iterazioni richiedno circa 10 minuti
 n_iter <- 50000
 burn_in <- 2000
 thin_step <- 20
@@ -45,10 +44,12 @@ curr_phi <- 0.5
 prior_mu_prec <- Diagonal(N, 1e-4)
 
 R_phi <- build_nngp_precision(nngp_struct, 1.0, curr_phi)
+ldet_R_curr <- attr(R_phi, "log_det")
 Q_nngp <- R_phi / curr_sigma2_spaz
 
 prop_var_phi <- 0.05
 n_acc_phi <- 0
+n_acc_total <- 0
 
 cat("\nAvvio Sampler Ibrido Vettorizzato (", n_iter, " iterazioni)...\n")
 pb <- txtProgressBar(min = 1, max = n_iter, style = 3)
@@ -62,7 +63,7 @@ for (iter in 1:n_iter) {
   b_post_mu <- sum_residui_mu / curr_sigma2_err
   curr_mu <- rnorm(N, mean = as.vector(b_post_mu / diag(Q_post_mu)), sd = sqrt(1 / diag(Q_post_mu)))
 
-  # STEP 2: beta
+  # STEP 2: beta (Vettorizzato su dsCMatrix simmetrica)
   Q_post_beta <- Q_nngp + Diagonal(N, 1 / curr_sigma2_err)
   chol_Q_beta <- chol(Q_post_beta)
   b_post_beta_mat <- (Y_mat - curr_mu) / curr_sigma2_err
@@ -73,22 +74,24 @@ for (iter in 1:n_iter) {
   eps_mat <- Y_mat - curr_mu - curr_beta
   curr_sigma2_err <- 1 / rgamma(1, shape = (N * M) / 2 + 0.01, rate = sum(eps_mat^2) / 2 + 0.01)
 
-  # STEP 4: Varianza Spaziale
+  # STEP 4: Varianza Spaziale (Gibbs Coniugato)
   quad_R_phi <- sum(curr_beta * (R_phi %*% curr_beta))
   shape_spaz <- (N * M) / 2 + 0.01
   rate_spaz  <- quad_R_phi / 2 + 0.01
   curr_sigma2_spaz <- 1 / rgamma(1, shape = shape_spaz, rate = rate_spaz)
   Q_nngp <- R_phi / curr_sigma2_spaz
 
-  # STEP 5: METROPOLIS per PHI
+  # STEP 5: METROPOLIS per PHI (Con log-determinante analitico O(N) gratuito!)
   log_phi_prop <- rnorm(1, mean = log(curr_phi), sd = sqrt(prop_var_phi))
   phi_prop <- exp(log_phi_prop)
 
   R_phi_prop <- build_nngp_precision(nngp_struct, 1.0, phi_prop)
-  Q_prop_phi <- R_phi_prop / curr_sigma2_spaz
+  ldet_R_prop <- attr(R_phi_prop, "log_det")
 
-  ldet_curr <- as.numeric(determinant(Q_nngp, logarithm = TRUE)$modulus)
-  ldet_prop <- as.numeric(determinant(Q_prop_phi, logarithm = TRUE)$modulus)
+  # Nota: il termine -N*log(curr_sigma2_spaz) si cancella esattamente tra curr e prop,
+  # ma lo includiamo per identità numerica assoluta col tuo script originale
+  ldet_curr <- ldet_R_curr - N * log(curr_sigma2_spaz)
+  ldet_prop <- ldet_R_prop - N * log(curr_sigma2_spaz)
 
   quad_curr <- quad_R_phi / curr_sigma2_spaz
   quad_prop <- sum(curr_beta * (R_phi_prop %*% curr_beta)) / curr_sigma2_spaz
@@ -96,16 +99,18 @@ for (iter in 1:n_iter) {
   ll_curr <- 0.5 * M * ldet_curr - 0.5 * quad_curr
   ll_prop <- 0.5 * M * ldet_prop - 0.5 * quad_prop
 
-  if (log(runif(1)) < (ll_prop + dnorm(log_phi_prop,0,5,log=T) - ll_curr - dnorm(log(curr_phi),0,5,log=T))) {
+  if (log(runif(1)) < (ll_prop + dnorm(log_phi_prop, 0, 5, log = TRUE) - ll_curr - dnorm(log(curr_phi), 0, 5, log = TRUE))) {
     curr_phi <- phi_prop
     R_phi <- R_phi_prop
-    Q_nngp <- Q_prop_phi
+    ldet_R_curr <- ldet_R_prop
+    Q_nngp <- R_phi / curr_sigma2_spaz
     n_acc_phi <- n_acc_phi + 1
+    if (iter > burn_in) n_acc_total <- n_acc_total + 1
   }
 
   if (iter <= burn_in && iter %% 100 == 0) {
-    if (n_acc_phi/100 > 0.44) prop_var_phi <- prop_var_phi * 1.2
-    if (n_acc_phi/100 < 0.23) prop_var_phi <- prop_var_phi * 0.8
+    if (n_acc_phi / 100 > 0.44) prop_var_phi <- prop_var_phi * 1.2
+    if (n_acc_phi / 100 < 0.23) prop_var_phi <- prop_var_phi * 0.8
     n_acc_phi <- 0
   }
 
@@ -117,14 +122,44 @@ for (iter in 1:n_iter) {
   setTxtProgressBar(pb, iter)
 }
 close(pb)
-cat("\nTempo totale:", round(Sys.time() - start_time, 2), "secondi\n")
+elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+cat(sprintf("\nTempo totale: %.2f secondi (%.2f minuti)\n", elapsed_sec, elapsed_sec / 60))
 
-# PLOT E DIAGNOSTICA
+# ==============================================================================
+# DIAGNOSTICA NUMERICHE E GRAFICHE POST-MCMC
+# ==============================================================================
 idx_thin <- seq(burn_in + 1, n_iter, by = thin_step)
 samples_sigma2_err_thin <- samples_sigma2_err[idx_thin]
 samples_sigma2_spaz_thin <- samples_sigma2_spaz[idx_thin]
 samples_phi_thin <- samples_phi[idx_thin]
 
+calc_ess <- function(x) {
+  n <- length(x)
+  ac <- acf(x, lag.max = min(100, n - 1), plot = FALSE)$acf[-1]
+  pos <- which(ac < 0.05)
+  k <- if (length(pos) > 0) pos[1] - 1 else length(ac)
+  if (k == 0) return(n)
+  return(n / (1 + 2 * sum(ac[1:k])))
+}
+
+summary_tab <- data.frame(
+  Parametro = c("sigma2_spaz", "phi", "sigma2_err"),
+  Vero      = c(sigma2_spaziale_true, phi_true, sigma2_errore_true),
+  Media     = c(mean(samples_sigma2_spaz_thin), mean(samples_phi_thin), mean(samples_sigma2_err_thin)),
+  Mediana   = c(median(samples_sigma2_spaz_thin), median(samples_phi_thin), median(samples_sigma2_err_thin)),
+  CI_2.5    = c(quantile(samples_sigma2_spaz_thin, 0.025), quantile(samples_phi_thin, 0.025), quantile(samples_sigma2_err_thin, 0.025)),
+  CI_97.5   = c(quantile(samples_sigma2_spaz_thin, 0.975), quantile(samples_phi_thin, 0.975), quantile(samples_sigma2_err_thin, 0.975)),
+  ESS       = round(c(calc_ess(samples_sigma2_spaz_thin), calc_ess(samples_phi_thin), calc_ess(samples_sigma2_err_thin)), 1)
+)
+
+cat("\n====================================================================\n")
+cat(" RIASSUNTO POSTERIORE E DIAGNOSTICA MCMC (N_thin =", length(idx_thin), ")\n")
+cat("====================================================================\n")
+print(summary_tab, row.names = FALSE, digits = 4)
+cat(sprintf("Tasso di accettazione post burn-in (phi): %.2f%%\n", 100 * n_acc_total / (n_iter - burn_in)))
+cat("====================================================================\n")
+
+# PLOT E DIAGNOSTICA
 par(mfrow = c(3, 2), mar = c(4, 4, 3, 1))
 
 ylim_spaz <- range(c(samples_sigma2_spaz_thin, sigma2_spaziale_true))
