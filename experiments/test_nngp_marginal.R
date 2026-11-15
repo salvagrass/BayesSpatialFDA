@@ -3,6 +3,7 @@
 # setwd("~/Desktop/Progetto_Bayesian/BayesSpatialFDA/experiments")
 # library(Matrix)
 # library(MASS)
+# library(fields) # Necessario per Thin Plate Splines (Tps)
 # library(Rcpp)
 # library(RcppEigen)
 # Rcpp::sourceCpp("../R/nngp_cpp.cpp")
@@ -16,6 +17,7 @@
 
 library(Matrix)
 library(MASS)
+library(fields)
 
 # SETUP DATI
 set.seed(42)
@@ -270,39 +272,129 @@ plot(as.vector(beta_true), as.vector(beta_post_mean), pch = 16, cex = 0.3, col =
 abline(0, 1, col = "red", lwd = 2)
 
 # ==============================================================================
-# TAVOLA GRAFICA 3 (2x2): GRIGLIA 20x20 AUTENTICA SENZA BORDI BIANCHI
+# TAVOLA GRAFICA 3 (2x2): SUPERFICIE CONTINUA ULTRA-SMOOTH (THIN PLATE SPLINES)
 # ==============================================================================
-x_grid <- seq(0, 5, length.out = n_side)
-y_grid <- seq(0, 5, length.out = n_side)
-pal_spaz <- hcl.colors(100, "Spectral", rev = TRUE)
+# Griglia HD 200x200 per eliminare qualsiasi effetto pixel/quadratino
+n_hd <- 200
+grid_hd <- list(
+  x = seq(0, 5, length.out = n_hd),
+  y = seq(0, 5, length.out = n_hd)
+)
+
+pal_spaz <- hcl.colors(256, "Spectral", rev = TRUE)
+
+# Funzione di smoothing tramite Thin Plate Splines (Tps)
+# lambda = 0.002 smussa le asperità della griglia 20x20 preservando i cluster spaziali
+get_tps_smooth <- function(z_vec, smooth_par = 0.002) {
+  fit_tps <- suppressWarnings(fields::Tps(coords, z_vec, lambda = smooth_par))
+  fields::predictSurface(fit_tps, grid.list = grid_hd, extrap = TRUE)
+}
+
+surf_true <- get_tps_smooth(beta_true[, 1], smooth_par = 0.002)
+surf_post <- get_tps_smooth(beta_post_mean[, 1], smooth_par = 0.002)
+surf_sd   <- get_tps_smooth(beta_node_sd, smooth_par = 0.005)
+err_t1    <- beta_post_mean[, 1] - beta_true[, 1]
+surf_err  <- get_tps_smooth(err_t1, smooth_par = 0.002)
 
 par(mfrow = c(2, 2), pty = "s", mar = c(3.8, 3.8, 2.8, 1.2))
 
-zlim_anom <- range(c(beta_true[, 1], beta_post_mean[, 1]))
+zlim_anom <- range(c(surf_true$z, surf_post$z), na.rm = TRUE)
 
-# 1. Anomalia Vera (t = 1)
-image(x_grid, y_grid, matrix(beta_true[, 1], nrow = n_side, ncol = n_side),
+# 1. Anomalia Vera (t = 1) - Smooth Spline
+image(surf_true$x, surf_true$y, surf_true$z,
       col = pal_spaz, zlim = zlim_anom, xlim = c(0, 5), ylim = c(0, 5),
-      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "True anomaly (t = 1)")
+      useRaster = TRUE, xaxs = "i", yaxs = "i", xlab = "x", ylab = "y",
+      main = "True anomaly (t = 1)")
+contour(surf_true$x, surf_true$y, surf_true$z, add = TRUE, col = rgb(0, 0, 0, 0.2), drawlabels = FALSE, nlevels = 8)
 box()
 
-# 2. Media a Posteriori NNGP (t = 1)
-image(x_grid, y_grid, matrix(beta_post_mean[, 1], nrow = n_side, ncol = n_side),
+# 2. Media a Posteriori NNGP (t = 1) - Smooth Spline
+image(surf_post$x, surf_post$y, surf_post$z,
       col = pal_spaz, zlim = zlim_anom, xlim = c(0, 5), ylim = c(0, 5),
-      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "Posterior mean NNGP (t = 1)")
+      useRaster = TRUE, xaxs = "i", yaxs = "i", xlab = "x", ylab = "y",
+      main = "Posterior mean NNGP (t = 1)")
+contour(surf_post$x, surf_post$y, surf_post$z, add = TRUE, col = rgb(0, 0, 0, 0.2), drawlabels = FALSE, nlevels = 8)
 box()
 
-# 3. Deviazione Standard a Posteriori NNGP
-image(x_grid, y_grid, matrix(beta_node_sd, nrow = n_side, ncol = n_side),
+# 3. Deviazione Standard a Posteriori NNGP - Smooth Spline
+image(surf_sd$x, surf_sd$y, surf_sd$z,
       col = pal_spaz, xlim = c(0, 5), ylim = c(0, 5),
-      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "Posterior SD NNGP")
+      useRaster = TRUE, xaxs = "i", yaxs = "i", xlab = "x", ylab = "y",
+      main = "Posterior SD NNGP")
 box()
 
-# 4. Errore di Stima (Media a Posteriori - Vero, t = 1)
-err_t1 <- beta_post_mean[, 1] - beta_true[, 1]
-image(x_grid, y_grid, matrix(err_t1, nrow = n_side, ncol = n_side),
+# 4. Errore di Stima (Media a Posteriori - Vero, t = 1) - Smooth Spline
+image(surf_err$x, surf_err$y, surf_err$z,
       col = pal_spaz, xlim = c(0, 5), ylim = c(0, 5),
-      xaxs = "i", yaxs = "i", xlab = "x", ylab = "y", main = "Error (Posterior mean - Truth)")
+      useRaster = TRUE, xaxs = "i", yaxs = "i", xlab = "x", ylab = "y",
+      main = "Error (Posterior mean - Truth)")
 box()
 
 par(mfrow = c(1, 1), pty = "m")
+
+# ==============================================================================
+# TAVOLA GRAFICA 4 (2x2): DIAGNOSTICA AVANZATA DI CONGRUENZA DEL MODELLO SULLE BETA
+# ==============================================================================
+par(mfrow = c(2, 2), pty = "m", mar = c(4.2, 4.2, 3, 1.2))
+
+# --- 1. VARIOGRAMMA EMPIRICO: SEGNALE VERO VS RESIDUI DI STIMA (t = 1) ---
+dist_vec <- as.vector(dist(coords))
+gamma_true <- 0.5 * as.vector(dist(beta_true[, 1]))^2
+gamma_err  <- 0.5 * as.vector(dist(beta_post_mean[, 1] - beta_true[, 1]))^2
+
+bins <- seq(0, 5, length.out = 20)
+bin_idx <- findInterval(dist_vec, bins)
+d_centers <- 0.5 * (bins[-length(bins)] + bins[-1])
+
+v_true <- tapply(gamma_true, bin_idx, mean)[1:length(d_centers)]
+v_err  <- tapply(gamma_err,  bin_idx, mean)[1:length(d_centers)]
+
+plot(d_centers, v_true, type = "b", pch = 16, col = "black", lwd = 2,
+     ylim = c(0, max(v_true, na.rm = TRUE) * 1.15),
+     xlab = "Distanza Spaziale (h)", ylab = "Semivarianza gamma(h)",
+     main = "1. Variogramma: Segnale vs Residui")
+lines(d_centers, v_err, type = "b", pch = 17, col = "firebrick", lwd = 2, lty = 2)
+# Curva teorica attesa
+curve(sigma2_spaziale_true * (1 - exp(-phi_true * x)), add = TRUE, col = "dodgerblue3", lwd = 2, lty = 3)
+legend("bottomright", legend = c("Beta Vero (Segnale)", "Teorico Esponenziale", "Residui (Errore NNGP)"),
+       col = c("black", "dodgerblue3", "firebrick"), lty = c(1, 3, 2), pch = c(16, NA, 17), lwd = 2, bty = "n", cex = 0.75)
+
+# --- 2. FUNZIONE DI CORRELAZIONE SPAZIALE: VERA VS A POSTERIORI ---
+d_seq <- seq(0, 4, length.out = 100)
+cor_true_curve <- exp(-phi_true * d_seq)
+
+# Calcolo banda di credibilità al 95% della correlazione spaziale
+cor_post_mat <- sapply(samples_phi_thin, function(p) exp(-p * d_seq))
+cor_mean <- rowMeans(cor_post_mat)
+cor_low  <- apply(cor_post_mat, 1, quantile, probs = 0.025)
+cor_high <- apply(cor_post_mat, 1, quantile, probs = 0.975)
+
+plot(d_seq, cor_true_curve, type = "l", lwd = 2, col = "black", ylim = c(0, 1),
+     xlab = "Distanza tra siti (h)", ylab = expression(rho(h) == exp(-phi * h)),
+     main = "2. Decadimento Correlazione Spaziale")
+polygon(c(d_seq, rev(d_seq)), c(cor_high, rev(cor_low)), col = rgb(0, 0.6, 0.6, 0.25), border = NA)
+lines(d_seq, cor_mean, col = "cyan4", lwd = 2, lty = 2)
+abline(h = 0.05, col = "grey50", lty = 3) # Soglia del Practical Range
+legend("topright", legend = c("Vera (phi = 1.2)", "Media Posteriore", "IC 95%"),
+       col = c("black", "cyan4", rgb(0, 0.6, 0.6, 0.35)), lty = c(1, 2, NA), pch = c(NA, NA, 15), lwd = 2, bty = "n", cex = 0.75)
+
+# --- 3. Q-Q PLOT DEI RESIDUI STANDARDIZZATI (CALIBRAZIONE PROBABILISTICA) ---
+z_scores <- as.vector((beta_true - beta_post_mean) / beta_post_sd)
+qqnorm(z_scores, pch = 16, cex = 0.4, col = rgb(0.2, 0.3, 0.7, 0.3),
+       main = paste0("3. Calibrazione Z-Score (SD = ", round(sd(z_scores), 3), ")"),
+       xlab = "Quantili Teorici N(0,1)", ylab = "Residui Standardizzati (Beta)")
+abline(0, 1, col = "red", lwd = 2)
+legend("topleft", legend = c("Ideale N(0,1)", paste0("Copertura 95%: ", round(cov95_beta, 1), "%")),
+       col = c("red", NA), lty = c(1, NA), lwd = 2, bty = "n", cex = 0.75)
+
+# --- 4. STRUTTURA DELL'INCERTEZZA (SD) VS DISTANZA DAL CENTRO DELLA GRIGLIA ---
+dist_from_center <- sqrt((coords[, 1] - 2.5)^2 + (coords[, 2] - 2.5)^2)
+plot(dist_from_center, beta_node_sd, pch = 16, col = rgb(0.8, 0.4, 0, 0.6),
+     xlab = "Distanza Euclidea dal Centro Griglia (2.5, 2.5)",
+     ylab = "Posterior SD media del nodo",
+     main = "4. Effetto Bordo sull'Incertezza di Beta")
+lines(lowess(dist_from_center, beta_node_sd, f = 0.5), col = "firebrick", lwd = 2.5)
+legend("topleft", legend = c("Nodi (N = 400)", "Trend Smooth (LOWESS)"),
+       col = c(rgb(0.8, 0.4, 0, 0.8), "firebrick"), pch = c(16, NA), lty = c(NA, 1), lwd = 2, bty = "n", cex = 0.75)
+
+par(mfrow = c(1, 1))
