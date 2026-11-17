@@ -52,7 +52,8 @@ sigma0      <- 2.0   # marginal sd considered surprisingly large
 alpha_sigma <- 0.05  # P(sigma_beta > sigma0) = alpha_sigma
 
 # ------------------------------------------------------------------------------
-SEED <- 2024 # seed of the prior draws and of the common random numbers
+SEED <- 2024
+N_draws <- 20000
 TAIL_Q <- 0.99 # prior quantile that defines a "rare" value in the field panels
 ALPHA_DEG <- 30 # direction arg(v)/2 of the strongest correlation, all panels
 FIELD_RES <- 400 # pixels per side of each field panel
@@ -74,6 +75,17 @@ cat(sprintf(
   lambdas$lambda_theta,
   lambdas$lambda_sigma_beta
 ))
+
+set.seed(SEED)
+Y <- matrix(rnorm(4 * N_draws), nrow = N_draws)
+theta <- t(apply(Y, 1, psi_reparam_vec, lambdas = lambdas))
+colnames(theta) <- c("v1", "v2", "kappa", "sigma_beta")
+
+norm_v <- sqrt(theta[, "v1"]^2 + theta[, "v2"]^2) # anisotropy strength
+half_angle <- (atan2(theta[, "v2"], theta[, "v1"]) %% (2 * pi)) / 2 # direction
+kappa <- theta[, "kappa"]
+sigma_beta <- theta[, "sigma_beta"]
+rho <- sqrt(8) / kappa # correlation range
 
 # ------------------------------------------------------------------------------
 # REALIZED FIELDS
@@ -200,3 +212,4 @@ print(
   ),
   row.names = FALSE
 )
+
