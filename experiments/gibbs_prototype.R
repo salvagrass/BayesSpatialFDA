@@ -4,9 +4,9 @@
 devtools::load_all(".")
 library(coda)
 
-source("gibbs_sampler/mcmc_updates.R")
-source("gibbs_sampler/run_sampler.R")
-source("gibbs_sampler/diagnostics.R")
+source("experiments/gibbs_sampler/mcmc_updates.R")
+source("experiments/gibbs_sampler/run_sampler.R")
+source("experiments/gibbs_sampler/diagnostics.R")
 
 
 if (!exists("%||%")) `%||%` <- function(a, b) if (is.null(a)) b else a
