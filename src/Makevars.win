@@ -5,7 +5,7 @@ CXX_STD = CXX17
 PKG_CPPFLAGS = -I../inst/include/
 
 # Compilation Flags (OpenMP + silenziamento warning Eigen)
-PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS) -Wno-ignored-attributes
+PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS) -Wno-ignored-attributes -Wa,-mbig-obj
 
 # Linking Libraries (OpenMP + Linear Algebra)
 PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS) $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)
@@ -15,6 +15,3 @@ SOURCES = $(wildcard *.cpp) $(wildcard */*.cpp)
 OBJECTS = $(SOURCES:.cpp=.o)
 
 all: $(SHLIB)
-
-clean:
-    rm -f $(OBJECTS) *.dll $(SHLIB)
