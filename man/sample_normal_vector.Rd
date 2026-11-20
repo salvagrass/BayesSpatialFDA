@@ -10,17 +10,22 @@ sample_normal_vector(mean, mat, N = NULL, is_precision = FALSE)
 \item{mean}{A numeric vector representing the mean. If a scalar is provided,
 it will be repeated \code{N} times.}
 
-\item{mat}{A numeric matrix representing the covariance matrix or its inverse. If a scalar
-is provided, it is treated as the variance of independent variables and an
-internal sparse diagonal matrix is generated.}
+\item{mat}{A numeric or sparse matrix representing the covariance matrix or
+its inverse (precision matrix). If a scalar is provided, it is treated as
+the variance (or precision) of independent variables and an internal sparse
+diagonal matrix is generated.}
 
 \item{N}{An optional integer specifying the dimension of the vector. If \code{NULL},
-it is inferred from the length of \code{mean} or the number of rows of \code{covariance}.}
+it is inferred from the length of \code{mean} or the number of rows of \code{mat}.}
+
+\item{is_precision}{Logical. If \code{TRUE}, \code{mat} is treated as a precision matrix
+rather than a covariance matrix. Default is \code{FALSE}.}
 }
 \value{
 A numeric vector of length \code{N} representing the generated sample.
 }
 \description{
 Generates a single random sample from a multivariate normal distribution.
-It handles scalar inputs for both mean and covariance efficiently using sparse matrices.
+It handles scalar inputs for both mean and covariance/precision efficiently
+using sparse matrices.
 }
