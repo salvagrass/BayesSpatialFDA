@@ -6,6 +6,7 @@ Authors@R:
 Description: Implements a Gibbs sampler for Bayesian spatial functional data analysis using the SPDE approach and RcppEigen.
 License: GPL (>= 3)
 Config/roxygen2/version: 8.1.1
+SystemRequirements: C++17
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 LinkingTo: 
@@ -16,3 +17,6 @@ Imports:
     RcppEigen,
     Matrix,
     fmesher
+Suggests: 
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
