@@ -152,9 +152,9 @@ public:
     Q_prop(matrix_2ring),
     Q_beta_curr(matrix_2ring),
     Q_beta_prop(matrix_2ring){
-        Q_solver_prop.analyzePattern(Q_prop);
-        B_solver_prop.analyzePattern(Q_prop);
-        B_solver_curr.analyzePattern(Q_prop);
+        Q_solver_prop -> analyzePattern(Q_prop);
+        B_solver_prop -> analyzePattern(Q_prop);
+        B_solver_curr -> analyzePattern(Q_prop);
     }
 
     void execute(
@@ -173,39 +173,34 @@ public:
 
 private:
     // Evaluates log pi(eta) at (theta; current mu, current sigma2 from state)
-    double eval_collapsed_log_target(
+    double eval_log_target(
         const Eigen::Vector4d &theta,
+         const SpMat& Q,
+        const Solver& Q_factor, 
+        const Solver& Q_b_factor,
+        Eigen::MatrixXd& W_beta,
         const ModelState &state,
         const SamplerContext &ctx,
-        SamplerMemory &mem,
-        bool use_prop
-    );
+        SamplerMemory &mem
+);
 
 
     std::unique_ptr<ThetaPrior> prior;
     std::unique_ptr<ProposalAdapter> adapter;
     double last_accept_prob = 0.0; // consumed only by the adapter
 
-
     SpMat Q_prop, Q_beta_prop,Q_beta_curr;
 
     // Factor of Q(theta) for the proposal slot
-    Solver Q_solver_prop;
+    std::unique_ptr<Solver> Q_solver_prop = std::make_unique<Solver>();
     // Factors of Q_beta,post(theta) for the current / proposal slots
-    Solver B_solver_curr;
-    Solver B_solver_prop;
-    // Plain values for both since the recipe rebuilds both factorizations at every sweep
-
-    // Private assembly scratch for Q_beta,post before factorizing
-    // Used by both curr and prop
-    // The B matrix is never read after factorization, so one buffer suffices
-    SpMat B_mat_scratch;
+    //Solver B_solver_curr;
+    std::unique_ptr<Solver> B_solver_curr = std::make_unique<Solver>();
+    std::unique_ptr<Solver> B_solver_prop = std::make_unique<Solver>();
 
     // Private assembly scratch for the factor sum_i b_i^T Q_beta,post^{-1} b_i,
-    // One buffer suffices since it is only used inside eval_collapsed_log_target,
-    // and those two calls (curr, prop) are sequential in execute
-    Eigen::MatrixXd W_beta_scratch;
-
+    Eigen::MatrixXd W_beta_curr;
+    Eigen::MatrixXd W_beta_prop;
 
     Eigen::Vector4d theta_prop;
 
