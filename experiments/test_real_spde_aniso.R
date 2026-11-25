@@ -31,6 +31,19 @@ real_data <- prepare_real_planar_data(
   cutoff        = 0.04
 )
 
+# caso KNN
+# real_data <- prepare_real_planar_data(
+#   path          = "data/climate_data.RData",
+#   center        = c(41.9028, 12.4964), # Roma
+#   shape         = "knn",
+#   k             = 400L,
+#   scale_to_unit = TRUE,
+#   build_mesh    = TRUE,
+#   max_edge      = c(0.10, 0.25),
+#   offset        = c(0.05, 0.25),
+#   cutoff        = 0.04
+# )
+
 Y_mat    <- real_data$y_mat
 Phi      <- real_data$Phi
 mesh     <- real_data$mesh
@@ -188,18 +201,22 @@ if (n_stored == num_iteration) {
   mcmc_start <- num_burn_in + 1L
 }
 
-# Traceplot in scala fisica interpretabile (catena intera + linee adaptive/burn-in)
+# Traceplot in scala fisica interpretabile (con ylim tarato sul post-burn-in per sigma_eps)
+sig_e_full <- sqrt(full_draws[, "sigma2_e"])
+sig_e_ylim <- range(sig_e_full[post_idx]) * c(0.995, 1.3)
+
 par(mfrow = c(2, 3), mar = c(4, 4, 2.2, 1))
 phys_traces <- list(
-  list(y = sqrt(full_draws[, "sigma2_e"]),                          main = "sigma_eps (°C)",   ylab = "°C"),
-  list(y = (sqrt(8) / full_draws[, "kappa"]) * scale_km,            main = "Range rho (km)",   ylab = "km"),
-  list(y = full_draws[, "sigma_beta"],                              main = "sigma_beta (°C)",  ylab = "°C"),
-  list(y = full_draws[, "v1"],                                      main = "Anisotropia v1",   ylab = "v1"),
-  list(y = full_draws[, "v2"],                                      main = "Anisotropia v2",   ylab = "v2"),
-  list(y = sqrt(full_draws[, "v1"]^2 + full_draws[, "v2"]^2),       main = "Norma ||v||",      ylab = "||v||")
+  list(y = sig_e_full,                                        main = "sigma_eps (°C) [zoom]", ylab = "°C",   ylim = sig_e_ylim),
+  list(y = (sqrt(8) / full_draws[, "kappa"]) * scale_km,      main = "Range rho (km)",          ylab = "km",   ylim = NULL),
+  list(y = full_draws[, "sigma_beta"],                        main = "sigma_beta (°C)",         ylab = "°C",   ylim = NULL),
+  list(y = full_draws[, "v1"],                                main = "Anisotropia v1",          ylab = "v1",   ylim = NULL),
+  list(y = full_draws[, "v2"],                                main = "Anisotropia v2",          ylab = "v2",   ylim = NULL),
+  list(y = sqrt(full_draws[, "v1"]^2 + full_draws[, "v2"]^2), main = "Norma ||v||",             ylab = "||v||", ylim = NULL)
 )
 for (tr in phys_traces) {
-  plot(tr$y, type = "l", col = "grey30", xlab = "Iterazione", ylab = tr$ylab, main = tr$main)
+  plot(tr$y, type = "l", col = "grey30", xlab = "Iterazione",
+       ylab = tr$ylab, main = tr$main, ylim = tr$ylim)
   if (n_stored == num_iteration) {
     abline(v = c(num_adaptive, num_burn_in), col = c("steelblue", "firebrick"), lty = 2)
   }
