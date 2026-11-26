@@ -1,15 +1,13 @@
 #pragma once
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
-#include <SamplingUtils.hpp>
+#include "SamplingUtils.hpp"
 
-inline void fast_sampling_GMRF(
-    const Eigen::VectorXd& b,
+inline void fast_sampling_GMRF( 
     const Eigen::SimplicialLLT<Eigen::SparseMatrix<double>>& Q_factor,
-    Eigen::VectorXd& out_vec,
+    Eigen::VectorXd& b,
     Eigen::VectorXd& buffer,
     std::mt19937_64 &rng
-
 ){
     buffer.noalias() = Q_factor.permutationP() * b;
     Q_factor.matrixL().solveInPlace(buffer);
@@ -19,7 +17,7 @@ inline void fast_sampling_GMRF(
         buffer(i) += std_normal(rng);
     }
     Q_factor.matrixU().solveInPlace(buffer);
-    out_vec.noalias() = Q_factor.permutationPinv() * buffer;
+    b.noalias() = Q_factor.permutationPinv() * buffer;
 }
 
 
@@ -30,9 +28,8 @@ public:
 
     // Adapt after one MH iteration, given the chain's current position (eta)
     // and the acceptance probability just computed.
-    virtual void update(
+    virtual Eigen::Vector4d update(
         const Eigen::Vector4d& eta_curr,
-        Eigen::Vector4d& eta_prop,
         std::mt19937_64& rng
     ) = 0;
 };
@@ -41,14 +38,15 @@ public:
 class FixedProposal : public ProposalStrategy{
 public:
     FixedProposal(double std_err_) : std_err(std_err_){}
-    void update(
+    Eigen::Vector4d update(
         const Eigen::Vector4d& eta_curr, 
-        Eigen::Vector4d& eta_prop,
         std::mt19937_64& rng
     ) override {
+        Eigen::Vector4d eta_prop;
         std::normal_distribution<double> normal(0.0,std_err);
         for(int i = 0; i<eta_curr.size();i++)
             eta_prop[i] = eta_curr[i] + normal(rng);
+        return eta_prop;
     }
 
 private:
@@ -66,15 +64,15 @@ public:
           online_mean(Eigen::Vector4d::Zero()),
           online_cov(Eigen::Matrix4d::Zero()) {}
 
-    void update(
+    Eigen::Vector4d update(
         const Eigen::Vector4d& eta_curr,
-        Eigen::Vector4d& eta_prop,
         std::mt19937_64& rng
     ) {
+        Eigen::Vector4d eta_prop;
         if (iter < num_skipped) {
-            fix_prop.update(eta_curr, eta_prop,rng);
+            eta_prop = fix_prop.update(eta_curr,rng);
             iter++;
-            return;
+            return eta_prop;
         }
 
         // Adaptation window
@@ -84,9 +82,9 @@ public:
 
             // Wait for at least 10 samples before trusting the matrix
             if (n < 10) {
-                fix_prop.update(eta_curr, eta_prop,rng);
+                eta_prop = fix_prop.update(eta_curr,rng);
                 iter++;
-                return;
+                return eta_prop;
             }
 
             constexpr double s_d = (2.38 * 2.38) / 4.0;
@@ -105,6 +103,7 @@ public:
         eta_prop.noalias() = solver.matrixL() * noise;
         eta_prop += eta_curr;
         iter++;
+        return eta_prop;
     }
 
 private:
@@ -122,7 +121,9 @@ private:
         online_cov = ((n - 2.0) / denom) * online_cov +
                      (1.0 / denom) * (diff_prev * diff_curr.transpose());
     }
-
+    
+    FixedProposal fix_prop;
+    
     size_t end_burnin;
     size_t num_skipped;
     size_t iter = 0;
@@ -131,7 +132,6 @@ private:
     Eigen::Matrix4d online_cov;
     Eigen::LLT<Eigen::Matrix4d> solver;
 
-    FixedProposal fix_prop;
 };
 
 
@@ -159,11 +159,11 @@ private:
 
 
 inline double PCPrior::f(double v_norm){
-    return std::sqrt(EIGEN_PI * (3 * std::cosh(2 * v_norm) + 1) / 3);
+    return std::sqrt(EIGEN_PI * (3.0 * std::cosh(2.0 * v_norm) + 1.0) / 3.0);
 };
 
 inline double PCPrior::f_prime(double v_norm){
-    return std::sqrt(EIGEN_PI) * std::sinh(2 * v_norm) / std::sqrt(std::cosh(2 * v_norm) + 1 / 3);
+    return std::sqrt(EIGEN_PI) * std::sinh(2 * v_norm) / std::sqrt(std::cosh(2 * v_norm) + 1.0 / 3.0);
 };
 
 inline double PCPrior::f_prime_over_v(double v_norm){
@@ -182,4 +182,20 @@ inline double PCPrior::log_pdf(const Eigen::Vector4d &theta) const{
     return res;
 };
 
+
+class EGPrior : public ThetaPrior{
+public:
+    EGPrior(double lambda_kappa,double lambda_sigma,double prec_v) 
+    : lambda_k(lambda_kappa),lambda_sigma(lambda_sigma),prec_v(prec_v){}
+
+    double log_pdf(const Eigen::Vector4d& theta) const override{
+        double v1 = theta[ThetaIdx::V1];
+        double v2 = theta[ThetaIdx::V2];
+        return -lambda_k*theta[ThetaIdx::KAPPA] 
+        -  lambda_sigma*theta[ThetaIdx::SIGMA_BETA]
+        - 0.5*prec_v*(v1*v1 + v2*v2);
+    }
+private:
+    const double lambda_k, lambda_sigma,prec_v;
+};
 

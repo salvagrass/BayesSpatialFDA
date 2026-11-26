@@ -10,7 +10,7 @@ class Factorizer{
 using SpMat = Eigen::SparseMatrix<double>;
 using Solver = Eigen::SimplicialLLT<SpMat>;
 public:
-    Factorizer(size_t num_threads_) : num_threads(num_threads_){
+    Factorizer(const ParallelConfig& config) : num_threads(config.chol_threads){
         batch.reserve(10);
     }
 
@@ -145,13 +145,13 @@ class BlockMHStep : public Step{
 public:
     BlockMHStep(
         std::unique_ptr<ThetaPrior> prior_,
-        std::unique_ptr<ProposalAdapter> adapter_,
+        std::unique_ptr<ProposalStrategy> proposal_,
         const SpMat& matrix_2ring
     ) : prior(std::move(prior_)), 
-    adapter(std::move(adapter_)),
+    proposal(std::move(proposal_)),
     Q_prop(matrix_2ring),
-    Q_beta_curr(matrix_2ring),
-    Q_beta_prop(matrix_2ring){
+    Q_beta_prop(matrix_2ring),
+    Q_beta_curr(matrix_2ring){
         Q_solver_prop -> analyzePattern(Q_prop);
         B_solver_prop -> analyzePattern(Q_prop);
         B_solver_curr -> analyzePattern(Q_prop);
@@ -182,12 +182,14 @@ private:
         const ModelState &state,
         const SamplerContext &ctx,
         SamplerMemory &mem
-);
+    );
 
+    Eigen::Vector4d theta_to_eta(const Eigen::Vector4d& theta);
+    Eigen::Vector4d eta_to_theta(const Eigen::Vector4d& eta);
 
     std::unique_ptr<ThetaPrior> prior;
-    std::unique_ptr<ProposalAdapter> adapter;
-    double last_accept_prob = 0.0; // consumed only by the adapter
+    std::unique_ptr<ProposalStrategy> proposal;
+    double last_accept_prob = 0.0; // consumed only by the proposal
 
     SpMat Q_prop, Q_beta_prop,Q_beta_curr;
 

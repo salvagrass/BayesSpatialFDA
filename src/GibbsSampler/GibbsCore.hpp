@@ -7,57 +7,56 @@
 class GibbsEngine
 {
 public:
-    GibbsEngine(const SamplerContext &ctx, const ModelState &init,
-                const SamplerMemory &mem,
-                std::seed_seq &seed, int num_iter, int num_burn_in,
-                int factor_threads = 1)
-        : ctx_(ctx), state_(init), mem_(ctx, seed),
-          factorizer_(factor_threads),
-          num_iter_(num_iter), num_burn_in_(num_burn_in) {}
+    GibbsEngine(
+        const SamplerContext& ctx, const ModelState& init, 
+        std::seed_seq &seed, int num_iter, int num_burn_in
+    ) : ctx(ctx), state(init), mem(ctx, seed), factorizer(ctx.config),
+        num_iter(num_iter), num_burn_in(num_burn_in) {
+            build_spde_matrix(ctx,mem,state.spde_hyperparameters,mem.Q_curr);
+            factorizer.submit_matrix(*mem.Q_solver,mem.Q_curr);
+            factorizer.factorize_parallel();
+        }
 
-    void add_step(std::unique_ptr<Step> s) { steps_.push_back(std::move(s)); }
-    void add_collector(std::unique_ptr<Recorder> r) { collectors_.push_back(std::move(r)); }
-    void add_collector(std::function<void(const SamplerContext &, const SamplerMemory &, const ModelState &)> m) { modifiers.push_back(std::move(m)); }
+    void add_step(std::unique_ptr<Step> s) { steps.push_back(std::move(s)); }
+    void add_collector(std::unique_ptr<Recorder> r) { collectors.push_back(std::move(r)); }
+    void add_modifier(std::function<void(const SamplerContext &, const SamplerMemory &, const ModelState &)> m) { modifiers.push_back(std::move(m)); }
 
     ChainOutput run()
     {
-
-        for (int i = 0; i < num_iter_; ++i)
+        for (int i = 0; i < num_iter; ++i)
         {
-            for (auto &s : steps_)
-                s->batch_matrix(ctx_, state_, mem_, factorizer_);
-
+            // 1. Preparing all of the matrices for parallel factorization
+            for (auto &s : steps)
+                s->batch_matrix(ctx, state, mem, factorizer);
             // 2. parallel barrier: all prebatchable factors, each into its own step's storage
-            factorizer_.factorize_parallel();
-
+            factorizer.factorize_parallel();
             // 3. Gibbs order, serial: RHS assembly + solve + sample only
-            for (auto &s : steps_)
-                s->execute(ctx_, state_, mem_);
-
-            // 5. thinned, post-burn-in recording
-            for (auto &c : collectors_)
-                c->observe(ctx_, state_, mem_, i);
-
-            //
+            for (auto &s : steps)
+                s->execute(ctx, state, mem);
+            // 4. Recording all of the outputs
+            for (auto &c : collectors)
+                c->observe(ctx, state, mem);
+            // 5. Applying modifiers to the chain 
             for (auto &m : modifiers)
-                m(ctx_, mem_, state_);
+                m(ctx, mem, state);
+            mem.curr_iter++;
         }
 
         ChainOutput out;
-        for (auto &c : collectors_)
+        for (auto &c : collectors)
             c->export_to_output(out);
         return out;
     }
 
 private:
-    const SamplerContext &ctx_;
-    ModelState state_;
-    SamplerMemory mem_;
-    Factorizer factorizer_;
-    std::vector<std::unique_ptr<Step>> steps_;
-    std::vector<std::unique_ptr<Recorder>> collectors_;
+    const SamplerContext &ctx;
+    ModelState state;
+    SamplerMemory mem;
+    Factorizer factorizer;
+    std::vector<std::unique_ptr<Step>> steps;
+    std::vector<std::unique_ptr<Recorder>> collectors;
     std::vector<std::function<void(const SamplerContext &, const SamplerMemory &, const ModelState &)>> modifiers;
-    int num_iter_, num_burn_in_;
+    int num_iter, num_burn_in;
 };
 
 class ChainRunner

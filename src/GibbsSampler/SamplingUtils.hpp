@@ -59,10 +59,43 @@ struct  ModelState{
  * the MCMC loop), finite element geometric matrices on \f$ \mathbb{S}^2 \f$, and problem dimensions.
  */
 struct SamplerContext{
+
+    SamplerContext(
+        Eigen::SparseMatrix<double> PhiTPhi_,
+        Eigen::MatrixXd PhiTY_,
+        Eigen::VectorXd C_,
+        Eigen::SparseMatrix<double> Gx_,
+        Eigen::SparseMatrix<double> Gy_,
+        Eigen::SparseMatrix<double> Gxy_,
+        const double YTY_sum_,
+        const size_t num_iters_,
+        const ParallelConfig config_,
+        const long num_observations_
+    ) : PhiTPhi(std::move(PhiTPhi_)), 
+    PhiTY(std::move(PhiTY_)),
+    PhiTY_sum(PhiTY.rowwise().sum()), 
+    C(std::move(C_)),
+    C_inv(C.cwiseInverse()),
+    Gx(std::move(Gx_)), 
+    Gy(std::move(Gy_)),
+    Gxy(std::move(Gxy_)), 
+    YTY_sum(YTY_sum_), 
+    num_observations(num_observations_),
+    num_vertices(PhiTPhi.rows()),
+    num_years(PhiTY.cols()),
+    Identity_V([this](){
+            Eigen::SparseMatrix<double> id(num_vertices,num_vertices);
+            id.setIdentity();
+            return id;
+        }()),
+    num_iters(num_iters_),
+    config(config_){}
+
+
     const Eigen::SparseMatrix<double> PhiTPhi;
     const Eigen::MatrixXd PhiTY;
     const Eigen::VectorXd PhiTY_sum; //rowise sum of PhiTY
-
+    
 
     const Eigen::VectorXd C; // Since C is diagonal we store it as a vector
     const Eigen::VectorXd C_inv; // We also store the inverse of C
@@ -73,11 +106,13 @@ struct SamplerContext{
 
     const double YTY_sum;
     
-    const Eigen::Index num_observations = 0;
-    const Eigen::Index num_vertices = 0;
-    const Eigen::Index num_years = 0;
+    const Eigen::Index num_observations;
+    const Eigen::Index num_vertices;
+    const Eigen::Index num_years;
 
-    const size_t num_iters = 0;
+    const Eigen::SparseMatrix<double> Identity_V; 
+
+    const size_t num_iters;
 
     const ParallelConfig config;
 };
@@ -104,11 +139,16 @@ struct SamplerMemory {
     Eigen::MatrixXd buffer_VM;
 
     std::mt19937_64 rng;
-    bool new_theta = false;
+    bool new_theta = true;
     size_t curr_iter = 0; 
-    SamplerMemory(const SamplerContext& context, std::seed_seq& seed);
+    SamplerMemory(const SamplerContext& context, std::seed_seq& seed) 
+    : buffer_V(context.num_vertices), buffer_VM(context.num_vertices, context.num_years),rng(seed){
+        buffer_1ring = context.Gx + context.Gy + context.Gxy;
+        buffer_1ring.diagonal() += context.C;
+        buffer_2ring = buffer_1ring*context.C_inv.asDiagonal()*buffer_1ring;
+        Q_solver->analyzePattern(buffer_2ring);
+    }
 };
-
 
 /**
  * @struct ChainOutput
@@ -149,23 +189,16 @@ inline void build_spde_matrix(
                     ? (1.0 + (v_norm * v_norm) / 6.0)
                     : (std::sinh(v_norm) / v_norm);
 
-    // 1. K = c0*Gx + c1*Gy + c2*Gxy + kappa^2 * diag(C)
-    mem.buffer_1ring = c0 * context.Gx + (v1 * s) * context.Gy + (v2 * s) * context.Gxy;
-    mem.buffer_1ring.diagonal() += (kappa * kappa) * context.C;
+    const double h11 = c0 + v1 * s;
+    const double h22 = c0 - v1 * s;
+    const double h12 = v2 * s;
+
+    mem.buffer_1ring = h11 * context.Gx 
+    + h22 * context.Gy 
+    + h12 * context.Gxy;
+    mem.buffer_1ring.diagonal() += (kappa*kappa) * context.C;
 
     // 2. Q = scale * K * C^{-1} * K
     const double scale = 1.0 / (4.0 * EIGEN_PI * kappa * kappa * sigma_u * sigma_u);
     out = scale * (mem.buffer_1ring * context.C_inv.asDiagonal() * mem.buffer_1ring);
-}
-
-
-
-
-inline SamplerMemory::SamplerMemory(const SamplerContext& context, std::seed_seq& seed)
-          : buffer_V(context.num_vertices),
-          buffer_VM(context.num_vertices, context.num_years),
-          rng(seed) {
-            const Eigen::Vector4d dummy_theta(1.0,1.0,0.5,0.5);
-            build_spde_matrix(context,*this,dummy_theta,buffer_2ring);
-            Q_solver->analyzePattern(buffer_2ring);
 }

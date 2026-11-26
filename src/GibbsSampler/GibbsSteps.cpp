@@ -39,8 +39,7 @@ void MuCenteredStep::batch_matrix(
         return;
 
     // Computing the posterior Q_mu matrix
-    matrix = ctx.num_years * mem.Q_curr;
-    matrix.diagonal().array() += prec_prior;
+    matrix = ctx.num_years * mem.Q_curr + prec_prior * ctx.Identity_V;
 
     fact.submit_matrix(solver, matrix);
 }
@@ -51,24 +50,10 @@ void MuCenteredStep::execute(
     SamplerMemory &mem)
 {
     // build the rhs: (1/sigma_mu^2) * mu_prior + Q(theta) * sum_i beta_i
-    mem.buffer_V.noalias() = mem.Q_curr * state.spatial_coeffs.rowwise().sum();
-    mem.buffer_V.noalias() += prec_prior * mu_prior;
+    state.gp_mean.noalias() = mem.Q_curr * state.spatial_coeffs.rowwise().sum();
+    state.gp_mean.noalias() += prec_prior * mu_prior;
 
-    state.gp_mean = fast_sampling_GMRF(mem.buffer_V, solver, mem.rng);
-};
-
-void AsisStep::execute(
-    const SamplerContext &ctx,
-    ModelState &state,
-    SamplerMemory &mem)
-{
-    mem.buffer_VM = state.spatial_coeffs.colwise() - state.gp_mean;
-
-    mem.buffer_V.noalias() = ctx.PhiTY_sum - ctx.PhiTPhi * mem.buffer_VM.rowwise().sum();
-    mem.buffer_V.noalias() += mu_prior * prior_prec_mu;
-
-    state.gp_mean = fast_sampling_GMRF(mem.buffer_V, solver, mem.rng);
-    state.spatial_coeffs = mem.buffer_VM.colwise() + state.gp_mean;
+    fast_sampling_GMRF(solver,state.gp_mean,mem.buffer_V,mem.rng);
 };
 
 void AsisStep::batch_matrix(
@@ -77,11 +62,24 @@ void AsisStep::batch_matrix(
     SamplerMemory &mem,
     Factorizer &fact)
 {
-    matrix = (ctx.num_years / state.error_variance) * ctx.PhiTPhi;
-    matrix.diagonal().array() += 1.0 / sigma_mu2;
-
+    matrix = (ctx.num_years / state.error_variance) * ctx.PhiTPhi + prior_prec_mu * ctx.Identity_V;
     fact.submit_matrix(solver, matrix);
 }
+
+void AsisStep::execute(
+    const SamplerContext &ctx,
+    ModelState &state,
+    SamplerMemory &mem)
+{
+    mem.buffer_VM = state.spatial_coeffs.colwise() - state.gp_mean;
+
+    state.gp_mean.noalias() = (ctx.PhiTY_sum - ctx.PhiTPhi * mem.buffer_VM.rowwise().sum())/state.error_variance;
+    state.gp_mean.noalias() += mu_prior * prior_prec_mu;
+
+    fast_sampling_GMRF(solver,state.gp_mean,mem.buffer_V,mem.rng);
+    state.spatial_coeffs = mem.buffer_VM.colwise() + state.gp_mean;
+};
+
 
 void BlockMHStep::batch_matrix(
     const SamplerContext &ctx,
@@ -89,12 +87,19 @@ void BlockMHStep::batch_matrix(
     SamplerMemory &mem,
     Factorizer &fact)
 {
-    adapter->update(state.spde_hyperparameters, last_accept_prob); //! Adapter called in batch_matrix, better to pass hyperparameters not in log form
-    build_spde_matrix(ctx, mem, theta_prop, Q_beta_prop);
+    Eigen::Vector4d eta_prop;
+    eta_prop = proposal->update(
+        theta_to_eta(state.spde_hyperparameters),
+        mem.rng
+    );
+    theta_prop = eta_to_theta(eta_prop);
+    build_spde_matrix(ctx, mem, theta_prop, Q_prop);
 
     // Computing the posterior for our beta_current, and the beta with the proposal
-    Q_beta_curr = mem.Q_curr + (1.0 / state.error_variance) * ctx.PhiTPhi;
-    Q_beta_prop = Q_prop + (1.0 / state.error_variance) * ctx.PhiTPhi;
+    Q_beta_curr = mem.Q_curr;
+    Q_beta_curr += (1.0 / state.error_variance) * ctx.PhiTPhi;
+    Q_beta_prop = Q_prop;
+    Q_beta_prop += (1.0 / state.error_variance) * ctx.PhiTPhi;
 
     fact.submit_matrix(*Q_solver_prop, Q_prop);
     fact.submit_matrix(*B_solver_curr, Q_beta_curr);
@@ -134,8 +139,7 @@ void BlockMHStep::execute(
     std::uniform_real_distribution<double> unif(0.0, 1.0);
     bool accept = std::log(unif(mem.rng)) < log_a;
 
-    if (accept)
-    {
+    if (accept){
         mem.new_theta = true;
         state.spde_hyperparameters = theta_prop;
         // Downstream steps and the beta draw below read mem.Q_spde_curr, so move the
@@ -145,12 +149,10 @@ void BlockMHStep::execute(
         Q_beta_curr.swap(Q_beta_prop);
         B_solver_curr.swap(B_solver_prop);
         W_beta_curr.swap(W_beta_prop);
-    }
-    else
+    }else
         mem.new_theta = false;
 
     // 3. beta draw, conditioned on the accepted theta.
-    // W_beta_curr already holds L^{-1} P b_post. Add standard-normal noise:
     std::normal_distribution<double> std_normal(0.0, 1.0);
     for (int j = 0; j < ctx.num_years; ++j)
         for (int i = 0; i < ctx.num_vertices; ++i)
@@ -161,17 +163,7 @@ void BlockMHStep::execute(
 
     // x = P^T w
     state.spatial_coeffs.noalias() = B_solver_curr->permutationPinv() * W_beta_curr;
-
-    // 4. feed the realized position to the proposal adapter.
-    // This refreshes the proposal Cholesky that next sweep's
-    // recipe will read to sample theta_prop
-    Eigen::Vector4d eta;
-    eta(0) = std::log(state.spde_hyperparameters[0]);
-    eta(1) = std::log(state.spde_hyperparameters[1]);
-    eta(2) = state.spde_hyperparameters[2];
-    eta(3) = state.spde_hyperparameters[3];
-};
-
+}
 double BlockMHStep::eval_log_target(
     const Eigen::Vector4d &theta,
     const SpMat &Q,
@@ -203,7 +195,31 @@ double BlockMHStep::eval_log_target(
     double log_det_Q = 2.0 * Q_factor.matrixL().nestedExpression().diagonal().array().log().sum();
     double log_det_Q_b_post = 2.0 * Q_b_factor.matrixL().nestedExpression().diagonal().array().log().sum();
 
-    double res = std::log(theta(0)) + std::log(theta(1)) + prior->log_pdf(theta) + ctx.num_years * 0.5 * (log_det_Q - log_det_Q_b_post - state.gp_mean.dot(mem.buffer_V)) + 0.5 * W_beta.squaredNorm();
+    double res = std::log(theta(ThetaIdx::KAPPA)) 
+    + std::log(theta(ThetaIdx::SIGMA_BETA)) 
+    + prior->log_pdf(theta) 
+    + ctx.num_years * 0.5 * (log_det_Q - log_det_Q_b_post - state.gp_mean.dot(mem.buffer_V)) 
+    + 0.5 * W_beta.squaredNorm();
 
     return res;
 };
+
+
+inline Eigen::Vector4d BlockMHStep::theta_to_eta(const Eigen::Vector4d& theta){
+    return Eigen::Vector4d(
+        std::log(theta[ThetaIdx::KAPPA]),
+        std::log(theta[ThetaIdx::SIGMA_BETA]),
+        theta[ThetaIdx::V1],
+        theta[ThetaIdx::V2]
+    );
+}
+
+
+inline Eigen::Vector4d BlockMHStep::eta_to_theta(const Eigen::Vector4d& eta){
+    return Eigen::Vector4d(
+        std::exp(eta[ThetaIdx::KAPPA]),
+        std::exp(eta[ThetaIdx::SIGMA_BETA]),
+        eta[ThetaIdx::V1],
+        eta[ThetaIdx::V2]
+    );
+}
