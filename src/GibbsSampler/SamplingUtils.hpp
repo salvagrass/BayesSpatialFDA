@@ -34,7 +34,6 @@ enum ThetaIdx : int {
 struct ParallelConfig{
     int num_chains = 1;
     int chol_threads = 1;
-    int year_threads = 1;
 };
 
 

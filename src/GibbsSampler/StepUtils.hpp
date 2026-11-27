@@ -26,84 +26,90 @@ public:
     ProposalStrategy() = default;
     virtual ~ProposalStrategy() = default;
 
-    // Adapt after one MH iteration, given the chain's current position (eta)
-    // and the acceptance probability just computed.
-    virtual Eigen::Vector4d update(
+    // propose the new eta vector to explore
+    virtual Eigen::Vector4d propose(
         const Eigen::Vector4d& eta_curr,
         std::mt19937_64& rng
     ) = 0;
+
+    // adapt the proposal based on the last acceptance probability 
+    virtual void adapt(
+        const Eigen::Vector4d& eta_curr, 
+        double accept_prob
+    ){return;}
 };
 
 // Non-adaptive: constant proposal covariance.
 class FixedProposal : public ProposalStrategy{
 public:
-    FixedProposal(double std_err_) : std_err(std_err_){}
-    Eigen::Vector4d update(
+    FixedProposal(Eigen::Matrix4d cov_matrix) : solver(cov_matrix){
+        if(solver.info() != Eigen::Success)
+            throw(std::runtime_error("Can't factorize covariance matrix"));
+    }
+    Eigen::Vector4d propose(
         const Eigen::Vector4d& eta_curr, 
         std::mt19937_64& rng
     ) override {
-        Eigen::Vector4d eta_prop;
-        std::normal_distribution<double> normal(0.0,std_err);
+        Eigen::Vector4d noise;
+        std::normal_distribution<double> normal(0.0,1.0);
         for(int i = 0; i<eta_curr.size();i++)
-            eta_prop[i] = eta_curr[i] + normal(rng);
-        return eta_prop;
+            noise[i] = normal(rng);
+        return eta_curr + solver.matrixL()*noise;
     }
 
 private:
-    const double std_err = 1;
+    const Eigen::LLT<Eigen::Matrix4d> solver;
 };
-
 
 
 class ProposalHaario : public ProposalStrategy {
 public:
-    ProposalHaario(size_t num_saved_, size_t num_skipped_, double std_err)
-        : fix_prop(std_err),
+    ProposalHaario(size_t num_saved_, size_t num_skipped_,Eigen::Matrix4d fixed_cov)
+        : fix_prop(fixed_cov),
           end_burnin(num_saved_),
           num_skipped(num_skipped_),
           online_mean(Eigen::Vector4d::Zero()),
-          online_cov(Eigen::Matrix4d::Zero()) {}
+          online_cov(Eigen::Matrix4d::Zero()),
+          log_scale(std::log(2.38*2.38/4)) {}
 
-    Eigen::Vector4d update(
+    Eigen::Vector4d propose(
         const Eigen::Vector4d& eta_curr,
         std::mt19937_64& rng
-    ) {
-        Eigen::Vector4d eta_prop;
-        if (iter < num_skipped) {
-            eta_prop = fix_prop.update(eta_curr,rng);
-            iter++;
-            return eta_prop;
-        }
+    ) override{
+        if(iter <= num_skipped)
+            return fix_prop.propose(eta_curr,rng);
 
-        // Adaptation window
-        if (iter < end_burnin) {
-            const size_t n = iter - num_skipped + 1;
-            update_stats(eta_curr, n);
+        // Adding 5% adaptive fixed mixtures
+        std::uniform_real_distribution unif(0.0,1.0);
+        if(unif(rng)<0.05 || iter-num_skipped < 10 || end_burnin < num_skipped+10)
+            return fix_prop.propose(eta_curr,rng);
+    
+        Eigen::Vector4d noise;
+        std::normal_distribution<double> norm_dist(0.0,1.0);
+        for(int i=0;i<noise.size();i++)
+            noise[i] = norm_dist(rng);
+        Eigen::Vector4d eta_prop = eta_curr + solver.matrixL()*noise;
+        return eta_prop;
+    }
+    
+    
+    void adapt(const Eigen::Vector4d& eta_curr,double acc_prob) override{
+        iter++;
+        constexpr double epsilon = 1e-6;
+        if(iter <= num_skipped)
+            return;
+        if(iter <= end_burnin){
+            update_stats(eta_curr,iter-num_skipped);
 
-            // Wait for at least 10 samples before trusting the matrix
-            if (n < 10) {
-                eta_prop = fix_prop.update(eta_curr,rng);
-                iter++;
-                return eta_prop;
-            }
+            const double gamma_n = std::pow(static_cast<double>(iter-num_skipped),-0.6);
+            log_scale += gamma_n*(acc_prob - 0.234);
+            log_scale = std::clamp(log_scale,-12.0,4.0);
 
-            constexpr double s_d = (2.38 * 2.38) / 4.0;
-            constexpr double epsilon = 1e-6;
-
-            Eigen::Matrix4d prop_cov = s_d * online_cov;
-            prop_cov.diagonal().array() += s_d * epsilon;
+            const double s_d = std::exp(log_scale);
+            prop_cov = s_d*online_cov;
+            prop_cov.diagonal().array() += s_d*epsilon;
             solver.compute(prop_cov);
         }
-        std::normal_distribution<double> normal(0.0, 1.0);
-        Eigen::Vector4d noise;
-        for (int i = 0; i < 4; ++i) {
-            noise[i] = normal(rng);
-        }
-
-        eta_prop.noalias() = solver.matrixL() * noise;
-        eta_prop += eta_curr;
-        iter++;
-        return eta_prop;
     }
 
 private:
@@ -130,7 +136,10 @@ private:
 
     Eigen::Vector4d online_mean;
     Eigen::Matrix4d online_cov;
+    Eigen::Matrix4d prop_cov;
     Eigen::LLT<Eigen::Matrix4d> solver;
+
+    double log_scale; // Used for ASWAM adaptation
 
 };
 

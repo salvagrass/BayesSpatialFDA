@@ -3,7 +3,7 @@
 #include <Eigen/Dense>
 #include "SamplingUtils.hpp"
 #include "StepUtils.hpp"
-
+#include <omp.h>
 
 
 class Factorizer{
@@ -19,7 +19,8 @@ public:
     }
 
     void factorize_parallel(){
-        //TODO Add openMP directive
+
+        #pragma omp parallel for num_threads(num_threads) if (num_threads > 1) schedule(static)
         for(size_t i = 0; i<batch.size();i++){
             batch[i].solver->factorize(*batch[i].matrix);
         }
@@ -189,7 +190,6 @@ private:
 
     std::unique_ptr<ThetaPrior> prior;
     std::unique_ptr<ProposalStrategy> proposal;
-    double last_accept_prob = 0.0; // consumed only by the proposal
 
     SpMat Q_prop, Q_beta_prop,Q_beta_curr;
 

@@ -88,7 +88,7 @@ void BlockMHStep::batch_matrix(
     Factorizer &fact)
 {
     Eigen::Vector4d eta_prop;
-    eta_prop = proposal->update(
+    eta_prop = proposal->propose(
         theta_to_eta(state.spde_hyperparameters),
         mem.rng
     );
@@ -134,7 +134,7 @@ void BlockMHStep::execute(
 
     // 2. accept/reject.
     double log_a = log_trgt_prop - log_trgt_curr;
-    last_accept_prob = std::min(1.0, std::exp(log_a));
+    double acc_prob = std::isfinite(log_a) ? std::min(1.0, std::exp(log_a)) : 0.0;
 
     std::uniform_real_distribution<double> unif(0.0, 1.0);
     bool accept = std::log(unif(mem.rng)) < log_a;
@@ -163,7 +163,10 @@ void BlockMHStep::execute(
 
     // x = P^T w
     state.spatial_coeffs.noalias() = B_solver_curr->permutationPinv() * W_beta_curr;
+    proposal->adapt(theta_to_eta(state.spde_hyperparameters),acc_prob);
 }
+
+
 double BlockMHStep::eval_log_target(
     const Eigen::Vector4d &theta,
     const SpMat &Q,

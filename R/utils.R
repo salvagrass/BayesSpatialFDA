@@ -157,21 +157,16 @@ plot_spde_field <- function(
   mesh,
   beta_vector,
   main_title = "Spatial Field",
-  resolution = 100
+  resolution = 100,
+  xlim = c(0, 10),
+  ylim = c(0, 10),
+  zlim = NULL
 ) {
-  # Extract spatial boundaries directly from the mesh
-  xmin <- min(mesh$loc[, 1])
-  xmax <- max(mesh$loc[, 1])
-  ymin <- min(mesh$loc[, 2])
-  ymax <- max(mesh$loc[, 2])
-
-  # Create a dense grid for continuous spatial interpolation
   grid_coords <- expand.grid(
-    x = seq(xmin, xmax, length.out = resolution),
-    y = seq(ymin, ymax, length.out = resolution)
+    x = seq(xlim[1], xlim[2], length.out = resolution),
+    y = seq(ylim[1], ylim[2], length.out = resolution)
   )
 
-  # Project vertex values onto the continuous grid using 1st-order FEM basis functions
   proj_vals <- fm_evaluate(
     mesh,
     loc = as.matrix(grid_coords),
@@ -179,14 +174,18 @@ plot_spde_field <- function(
   )
   z_matrix <- matrix(proj_vals, nrow = resolution, ncol = resolution)
 
-  # Setup color palette and render image
   col_palette <- hcl.colors(100, palette = "Spectral", rev = TRUE)
 
+  if (is.null(zlim)) {
+    zlim <- range(z_matrix, na.rm = TRUE)
+  }
+
   image(
-    seq(xmin, xmax, length.out = resolution),
-    seq(ymin, ymax, length.out = resolution),
+    seq(xlim[1], xlim[2], length.out = resolution),
+    seq(ylim[1], ylim[2], length.out = resolution),
     z_matrix,
     col = col_palette,
+    zlim = zlim,
     asp = 1,
     main = main_title,
     xlab = "X",

@@ -4,6 +4,8 @@
 #include "GibbsSteps.hpp"
 #include "GibbsHooks.hpp"
 
+#include <omp.h>
+
 class GibbsEngine
 {
 public:
@@ -62,7 +64,7 @@ private:
 class ChainRunner
 {
     using VecEngines = std::vector<std::unique_ptr<GibbsEngine>>;
-    using HookConfigurator = std::function<void(GibbsEngine &)>;
+    using Configurator = std::function<void(GibbsEngine &)>;
 
 public:
     ChainRunner(
@@ -70,10 +72,36 @@ public:
         const std::vector<ModelState> &init_states,
         uint64_t base_seed,
         size_t num_iter_,
-        size_t num_burn_in_);
+        size_t num_burn_in_)
+        : context(context_), num_iter(num_iter_),num_burn_in(num_burn_in_), 
+        num_chains(context.config.num_chains),num_threads(context.config.num_chains){
+            engines.reserve(num_chains);
+            // Constructing the engines
+            const uint32_t lo = static_cast<uint32_t>(base_seed);
+            const uint32_t hi = static_cast<uint32_t>(base_seed >> 32);
 
-    void configure_hook(const HookConfigurator &config);
-    std::vector<ChainOutput> run();
+            for(size_t i = 0; i<num_chains;i++){
+                std::seed_seq seed({lo,hi,static_cast<uint32_t>(i)});
+                engines.push_back(
+                    std::make_unique<GibbsEngine>(context,init_states[i],seed,num_iter,num_burn_in)
+                );
+            }
+        }
+
+    void configure(const Configurator &config){
+        for (const auto& engine_ptr : engines)
+            config(*engine_ptr);
+    }
+    std::vector<ChainOutput> run(){
+        
+        std::vector<ChainOutput> outs(num_chains);
+
+        #pragma omp parallel for num_threads(num_threads) if (num_threads > 1) schedule(static)
+        for(size_t i = 0;i<num_chains;i++)
+            outs[i] = engines[i]->run();
+        
+        return outs;
+    }       
 
     size_t get_num_iterations() const { return num_iter; }
     size_t get_num_burn_in() const { return num_burn_in; }
@@ -84,5 +112,8 @@ private:
     const size_t num_iter;
     const size_t num_burn_in;
     const size_t num_chains;
+    const size_t num_threads;
     VecEngines engines;
+
+
 };
