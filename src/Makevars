@@ -2,10 +2,11 @@
 CXX_STD = CXX17
 
 # Include path
-PKG_CPPFLAGS = -I../inst/include/
+PKG_CPPFLAGS = -I../inst/include/ 
 
-# Compilation Flags (OpenMP + silenziamento warning Eigen)
-PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS) -Wno-ignored-attributes
+# Compilation Flags 
+CXXFLAGS = -O3 -g -fno-omit-frame-pointer -march=native
+PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS) -DEIGEN_NO_DEBUG -Wno-ignored-attributes
 
 # Linking Libraries (OpenMP + Linear Algebra)
 PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS) $(LAPACK_LIBS) $(BLAS_LIBS) $(FLIBS)

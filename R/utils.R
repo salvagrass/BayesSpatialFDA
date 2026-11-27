@@ -1,15 +1,19 @@
 #' Sample from a Multivariate Normal Distribution
 #'
 #' Generates a single random sample from a multivariate normal distribution.
-#' It handles scalar inputs for both mean and covariance efficiently using sparse matrices.
+#' It handles scalar inputs for both mean and covariance/precision efficiently
+#' using sparse matrices.
 #'
 #' @param mean A numeric vector representing the mean. If a scalar is provided,
 #'   it will be repeated `N` times.
-#' @param mat A numeric matrix representing the covariance matrix or its inverse. If a scalar
-#'   is provided, it is treated as the variance of independent variables and an
-#'   internal sparse diagonal matrix is generated.
+#' @param mat A numeric or sparse matrix representing the covariance matrix or
+#'   its inverse (precision matrix). If a scalar is provided, it is treated as
+#'   the variance (or precision) of independent variables and an internal sparse
+#'   diagonal matrix is generated.
 #' @param N An optional integer specifying the dimension of the vector. If `NULL`,
-#'   it is inferred from the length of `mean` or the number of rows of `covariance`.
+#'   it is inferred from the length of `mean` or the number of rows of `mat`.
+#' @param is_precision Logical. If `TRUE`, `mat` is treated as a precision matrix
+#'   rather than a covariance matrix. Default is `FALSE`.
 #'
 #' @return A numeric vector of length `N` representing the generated sample.
 #' @importFrom Matrix Diagonal Matrix
@@ -70,13 +74,17 @@ sample_normal_vector <- function(mean, mat, N = NULL, is_precision = FALSE) {
 }
 
 
-#' Anisotropy matrix entries H_v from the half-angle vector v.
+#' Anisotropy Matrix Entries from the Half-Angle Vector
 #'
-#' Implements H_v = cosh(||v||) I + sinh(||v||)/||v|| * [[v1 v2],[v2 -v1]],
-#' with the removable isotropic limit sinh(||v||)/||v|| -> 1 as ||v|| -> 0.
+#' Computes the entries of the symmetric positive-definite diffusion tensor
+#' \eqn{H_v = \cosh(\|v\|) I_2 + \frac{\sinh(\|v\|)}{\|v\|} \begin{pmatrix} v_1 & v_2 \\ v_2 & -v_1 \end{pmatrix}},
+#' using the removable isotropic limit \eqn{\sinh(\|v\|)/\|v\| \to 1} as
+#' \eqn{\|v\| \to 0}.
 #'
-#' @param v1,v2 Components of the anisotropy vector.
-#' @return Named list with scalars H11, H22, H12.
+#' @param v1 Numeric scalar. First component of the anisotropy vector.
+#' @param v2 Numeric scalar. Second component of the anisotropy vector.
+#'
+#' @return A named list with scalars `H11`, `H22`, and `H12`.
 anisotropy_from_v <- function(v1, v2) {
   norm_v <- sqrt(v1^2 + v2^2)
   if (norm_v < .Machine$double.eps) {
@@ -94,17 +102,18 @@ anisotropy_from_v <- function(v1, v2) {
 }
 
 
-#' Closed boundary loops of a mesh
+#' Closed Boundary Loops of a Mesh
 #'
 #' Chains the boundary edges of the mesh (the triangle edges that belong to
 #' exactly one triangle) into closed loops of vertex indices: the outer
 #' boundary and one loop per hole.
 #'
-#' This function is used internally as a helper by `plot_spde_field()`.
+#' This function is used internally as a helper by [plot_spde_field()].
 #'
-#' @param mesh The mesh object created with fmesher.
-#' @return List of integer vectors of mesh vertex indices; each is one loop,
-#'   without repeating its first vertex at the end.
+#' @param mesh A mesh object created with `fmesher`.
+#'
+#' @return A list of integer vectors of mesh vertex indices; each element is
+#'   one closed loop without repeating its first vertex at the end.
 mesh_boundary_loops <- function(mesh) {
   tv <- mesh$graph$tv
   edges <- rbind(tv[, c(1, 2)], tv[, c(2, 3)], tv[, c(3, 1)])
@@ -128,199 +137,108 @@ mesh_boundary_loops <- function(mesh) {
 }
 
 
-#' Plot a continuous SPDE spatial field using mesh and 1st-order FEM basis functions
+#' Plot a Continuous SPDE Spatial Field
 #'
 #' @description Plots the piecewise-linear FEM field defined by the mesh vertex
-#'   values, with its own colour legend. The field is evaluated exactly at the
-#'   pixel centres and the picture is cut along the
-#'   true mesh boundary. Base graphics: it draws into the current panel, so it
-#'   can be combined with `par(mfrow = ...)` or `layout()`.
-#' @param mesh The mesh object created with fmesher.
-#' @param beta_vector Numeric vector containing values associated with the mesh vertices (e.g., posterior mean).
-#' @param main_title Title of the plot (a string or a plotmath expression).
-#' @param resolution Resolution of the interpolation grid (default 100x100).
+#'   values, with its own colour legend. The field is evaluated at the pixel
+#'   centres and clipped along the true mesh boundary using base graphics.
+#'
+#' @param mesh A mesh object created with `fmesher`.
+#' @param beta_vector Numeric vector containing values associated with the mesh
+#'   vertices (e.g., posterior mean).
+#' @param main_title Character string or `plotmath` expression for the plot title.
+#'   Default is `"Spatial Field"`.
+#' @param resolution Integer. Resolution of the interpolation grid
+#'   (`resolution x resolution`). Default is `100`.
+#'
 #' @return Invisibly, a list with the pixel centres `x`, `y` and the matrix `z`
 #'   of plotted values (`NA` outside the mesh). Called for its side effect.
 plot_spde_field <- function(
   mesh,
   beta_vector,
   main_title = "Spatial Field",
-  resolution = 100
+  resolution = 100,
+  xlim = c(0, 10),
+  ylim = c(0, 10),
+  zlim = NULL
 ) {
-  beta_vector <- as.numeric(beta_vector)
-  loc <- mesh$loc[, 1:2, drop = FALSE]
-  xr <- range(loc[, 1])
-  yr <- range(loc[, 2])
-  w <- diff(xr)
-  h <- diff(yr)
-
-  # Pixel centres: resolution x resolution cells tiling the mesh bounding box
-  gx <- xr[1] + (seq_len(resolution) - 0.5) * w / resolution
-  gy <- yr[1] + (seq_len(resolution) - 0.5) * h / resolution
-  grid_coords <- as.matrix(expand.grid(x = gx, y = gy))
-
-  # Evaluate the 1st-order FEM field at the pixel centres (NA outside the mesh)
-  z <- matrix(
-    fm_evaluate(mesh, loc = grid_coords, field = beta_vector),
-    nrow = resolution,
-    ncol = resolution
+  grid_coords <- expand.grid(
+    x = seq(xlim[1], xlim[2], length.out = resolution),
+    y = seq(ylim[1], ylim[2], length.out = resolution)
   )
 
-  # Pixels straddling the boundary whose centre falls outside the mesh would be
-  # left blank and give a jagged edge. They take the field value at the nearest
-  # boundary point (exact: the field is linear along an edge); the part of them
-  # lying outside the mesh is masked below.
-  grow <- function(m) {
-    padded <- matrix(FALSE, nrow(m) + 2, ncol(m) + 2)
-    padded[1 + seq_len(nrow(m)), 1 + seq_len(ncol(m))] <- m
-    out <- m
-    for (di in 0:2) {
-      for (dj in 0:2) {
-        out <- out | padded[di + seq_len(nrow(m)), dj + seq_len(ncol(m))]
-      }
-    }
-    out
-  }
-  loops <- mesh_boundary_loops(mesh)
-  edge <- which(is.na(z) & grow(grow(!is.na(z))))
-  if (length(edge) > 0) {
-    seg <- do.call(
-      rbind,
-      lapply(loops, function(loop) cbind(loop, c(loop[-1], loop[1])))
-    )
-    a <- loc[seg[, 1], , drop = FALSE]
-    d <- loc[seg[, 2], , drop = FALSE] - a
-    px <- outer(grid_coords[edge, 1], a[, 1], "-") # pixel x segment
-    py <- outer(grid_coords[edge, 2], a[, 2], "-")
-    dx <- rep(d[, 1], each = length(edge))
-    dy <- rep(d[, 2], each = length(edge))
-    t <- pmin(pmax((px * dx + py * dy) / (dx^2 + dy^2), 0), 1)
-    dist2 <- (px - t * dx)^2 + (py - t * dy)^2
-    nearest <- max.col(-dist2, ties.method = "first")
-    t <- t[cbind(seq_along(edge), nearest)]
-    z[edge] <- (1 - t) *
-      beta_vector[seg[nearest, 1]] +
-      t * beta_vector[seg[nearest, 2]]
+  proj_vals <- fm_evaluate(
+    mesh,
+    loc = as.matrix(grid_coords),
+    field = beta_vector
+  )
+  z_matrix <- matrix(proj_vals, nrow = resolution, ncol = resolution)
+
+  col_palette <- hcl.colors(100, palette = "Spectral", rev = TRUE)
+
+  if (is.null(zlim)) {
+    zlim <- range(z_matrix, na.rm = TRUE)
   }
 
-  # A P1 field attains its extremes at the vertices
-  zlim <- range(beta_vector, finite = TRUE)
-  if (diff(zlim) == 0) {
-    zlim <- zlim + c(-0.5, 0.5)
-  }
-  col_palette <- hcl.colors(256, palette = "Spectral", rev = TRUE)
-  ink <- "grey25"
-
-  # Legend geometry: a bar as tall as the map, to its right, inside the plot
-  # region. The plot region is sized so that map + legend fit at aspect 1.
-  ticks <- pretty(zlim, n = 5)
-  ticks <- ticks[ticks >= zlim[1] & ticks <= zlim[2]]
-  tick_labels <- format(ticks, trim = TRUE)
-  cex_axis <- par("cex.axis")
-  bar_gap <- 0.04 * w
-  bar_width <- 0.045 * w
-
-  plot.new()
-  inch <- par("cin")[2] * par("cex") # one text line, in inches
-  label_inches <- max(strwidth(tick_labels, units = "inches", cex = cex_axis)) +
-    0.6 * inch
-  pin <- par("pin")
-  scale <- min(
-    (pin[1] - label_inches) / (w + bar_gap + bar_width),
-    pin[2] / h
-  ) # inches per user unit
-  plot.window(
-    xlim = c(xr[1], xr[2] + bar_gap + bar_width + label_inches / scale),
-    ylim = yr,
+  image(
+    seq(xlim[1], xlim[2], length.out = resolution),
+    seq(ylim[1], ylim[2], length.out = resolution),
+    z_matrix,
+    col = col_palette,
+    zlim = zlim,
     asp = 1,
-    xaxs = "i",
-    yaxs = "i"
+    main = main_title,
+    xlab = "X",
+    ylab = "Y"
   )
-  line <- inch / scale # one text line, in user units
-
-  image(gx, gy, z, zlim = zlim, col = col_palette, add = TRUE, useRaster = TRUE)
-
-  # Mask everything outside the mesh (even-odd rule: bounding box minus the
-  # mesh domain, holes included), then outline the boundary.
-  pad <- 0.01 * max(w, h)
-  mask_x <- c(xr[1] - pad, xr[2] + pad, xr[2] + pad, xr[1] - pad)
-  mask_y <- c(yr[1] - pad, yr[1] - pad, yr[2] + pad, yr[2] + pad)
-  for (loop in loops) {
-    mask_x <- c(mask_x, NA, loc[loop, 1])
-    mask_y <- c(mask_y, NA, loc[loop, 2])
-  }
-  bg <- par("bg")
-  if (grDevices::col2rgb(bg, alpha = TRUE)[4] == 0) {
-    bg <- "white"
-  }
-  polypath(mask_x, mask_y, rule = "evenodd", col = bg, border = NA)
-  for (loop in loops) {
-    polygon(loc[loop, 1], loc[loop, 2], border = ink, lwd = 0.8)
-  }
-
-  # Axes attached to the map (ticks and numbers only)
-  x_at <- pretty(xr)
-  y_at <- pretty(yr)
-  axis(
-    1,
-    at = x_at[x_at >= xr[1] & x_at <= xr[2]],
-    pos = yr[1] - 0.3 * line,
-    lwd = 0,
-    lwd.ticks = 0.8,
-    tcl = -0.25,
-    mgp = c(3, 0.3, 0),
-    col.ticks = ink,
-    col.axis = ink
-  )
-  axis(
-    2,
-    at = y_at[y_at >= yr[1] & y_at <= yr[2]],
-    pos = xr[1] - 0.3 * line,
-    lwd = 0,
-    lwd.ticks = 0.8,
-    tcl = -0.25,
-    mgp = c(3, 0.5, 0),
-    las = 1,
-    col.ticks = ink,
-    col.axis = ink
-  )
-
-  # Colour legend
-  bar_x <- xr[2] + bar_gap + c(0, bar_width)
-  rasterImage(
-    as.raster(matrix(rev(col_palette), ncol = 1)),
-    bar_x[1],
-    yr[1],
-    bar_x[2],
-    yr[2],
-    interpolate = FALSE
-  )
-  rect(bar_x[1], yr[1], bar_x[2], yr[2], border = ink, lwd = 0.8)
-  tick_y <- yr[1] + (ticks - zlim[1]) / diff(zlim) * h
-  tick_x <- bar_x[2] + 0.25 * line
-  segments(bar_x[2], tick_y, tick_x, tick_y, col = ink, lwd = 0.8)
-  text(
-    bar_x[2] + 0.5 * line,
-    tick_y,
-    tick_labels,
-    adj = c(0, 0.5),
-    cex = cex_axis,
-    col = ink,
-    xpd = NA
-  )
-
-  # Title centred on the map, just above it
-  text(
-    mean(xr),
-    yr[2] + 0.7 * line,
-    main_title,
-    adj = c(0.5, 0),
-    cex = par("cex.main"),
-    font = par("font.main"),
-    col = par("col.main"),
-    xpd = NA
-  )
-
-  invisible(list(x = gx, y = gy, z = z))
 }
+#' Build the Anisotropic SPDE Precision Matrix
+#'
+#' @description
+#' Assembles the sparse Gaussian Markov Random Field (GMRF) precision matrix
+#' \eqn{Q(\theta)} for the anisotropic Matérn SPDE with smoothness \eqn{\nu = 1}
+#' under the half-angle parameterization:
+#' \deqn{Q(\theta) = \frac{1}{4\pi\kappa^2\sigma_\beta^2} (\kappa^2 \tilde{C} + G_{H_v}) \tilde{C}^{-1} (\kappa^2 \tilde{C} + G_{H_v})}
+#' where \eqn{\tilde{C}} is the lumped diagonal mass matrix and \eqn{G_{H_v}}
+#' is the anisotropic stiffness matrix built from the precomputed geometric
+#' stiffness components and [anisotropy_from_v()].
+#'
+#' @param spde_matrices A named list of precomputed finite element matrices
+#'   containing the mass matrix `C` and the stiffness components `K11`, `K12`,
+#'   and `K22`.
+#' @param kappa Numeric scalar (\eqn{\kappa > 0}). SPDE spatial inverse
+#'   length-scale parameter, related to the empirical correlation range via
+#'   \eqn{\rho = \sqrt{8}/\kappa}.
+#' @param sigma_beta Numeric scalar (\eqn{\sigma_\beta > 0}). Marginal
+#'   standard deviation of the latent spatial field.
+#' @param v1 Numeric scalar. First component of the unconstrained anisotropy
+#'   vector \eqn{v = (v_1, v_2)^\top}. Default is `0.0`.
+#' @param v2 Numeric scalar. Second component of the unconstrained anisotropy
+#'   vector \eqn{v = (v_1, v_2)^\top}. Default is `0.0`.
+#'
+#' @return A symmetric sparse precision matrix of dimension \eqn{V \times V}.
+#' @importFrom Matrix Diagonal rowSums
+#' @export
+build_precision_matrix <- function(
+  spde_matrices,
+  kappa,
+  sigma_beta,
+  v1 = 0.0,
+  v2 = 0.0
+) {
+  H <- anisotropy_from_v(v1, v2)
 
+  global_K <- H$H11 *
+    spde_matrices$K11 +
+    H$H12 * spde_matrices$K12 +
+    H$H22 * spde_matrices$K22
+
+  c_lumped <- rowSums(spde_matrices$C)
+  C_tilde <- Diagonal(x = c_lumped)
+  C_tilde_inv <- Diagonal(x = 1 / c_lumped)
+
+  core_mat <- global_K + (kappa^2) * C_tilde
+  scale <- 1 / (4 * pi * kappa^2 * sigma_beta^2)
+
+  scale * (core_mat %*% C_tilde_inv %*% core_mat)
+}
