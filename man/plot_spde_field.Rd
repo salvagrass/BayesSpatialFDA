@@ -8,7 +8,10 @@ plot_spde_field(
   mesh,
   beta_vector,
   main_title = "Spatial Field",
-  resolution = 100
+  resolution = 100,
+  xlim = c(0, 10),
+  ylim = c(0, 10),
+  zlim = NULL
 )
 }
 \arguments{

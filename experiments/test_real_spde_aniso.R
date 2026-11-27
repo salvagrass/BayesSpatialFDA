@@ -1,16 +1,14 @@
 # ==============================================================================
-# REAL-DATA PLANAR TEST - ANISOTROPIC SPDE PC-GIBBS SAMPLER (MERGED VERSION)
+# REAL-DATA PLANAR TEST - ANISOTROPIC SPDE PC-GIBBS SAMPLER (C++ RCPP BACKEND)
 # Model: Y_i = Phi %*% beta_i + eps_i,   beta_i | mu, theta ~ N_V(mu, Q(theta)^-1)
 # ==============================================================================
 
-devtools::load_all()
+devtools::load_all(compile = FALSE)
 library(Matrix)
+library(fmesher)
 library(coda)
 library(ggplot2)
 library(grid)
-
-source("experiments/pc_gibbs/update_mcmc.R")
-source("experiments/pc_gibbs/run_sampler.R")
 
 # ------------------------------------------------------------------------------
 # 1. CARICAMENTO DATI REALI E MESH CON BORDO ESTERNO AMPIO (UNITÀ = side_km)
@@ -44,8 +42,8 @@ real_data <- prepare_real_planar_data(
 #   cutoff        = 0.04
 # )
 
-Y_mat    <- real_data$y_mat
-Phi      <- real_data$Phi
+Y_mat    <- as.matrix(real_data$y_mat)
+Phi      <- as(real_data$Phi, "dgCMatrix")
 mesh     <- real_data$mesh
 years    <- real_data$years
 scale_km <- real_data$meta$scale_factor_km
@@ -82,7 +80,7 @@ legend(
   "topright",
   legend = c(
     sprintf("Observations (N = %d)", N),
-    "Square boundary",
+    "Domain boundary",
     if (empty_nodes > 0L) sprintf("Empty nodes (%d)", empty_nodes)
   ),
   col = c("steelblue", "red", if (empty_nodes > 0L) "darkorange"),
@@ -103,134 +101,96 @@ if (!all(c("C", "K11", "K12", "K22") %in% names(spde_matrices))) {
   )
 }
 
-# ------------------------------------------------------------------------------
-# 3. PC PRIORS FISICHE E INIZIALIZZAZIONE INTELLIGENTE (UNITÀ = scale_km)
-# ------------------------------------------------------------------------------
-# PC prior su kappa: P(rho < rho0_km) = P(kappa > sqrt(8)/rho0) = alpha_rho
-rho0_km <- 200
-rho0    <- rho0_km / scale_km
-alpha_rho <- 0.05
-lambda_kappa <- -(rho0 / sqrt(8)) * log(alpha_rho)
-
-# PC prior su sigma_beta: P(sigma_beta > sig0) = alpha_sig
-sig0 <- 5.0
-alpha_sig <- 0.05
-lambda_sigma_beta <- -log(alpha_sig) / sig0
-
-# Prior su vettore anisotropia v = (v1, v2) ~ N(0, sigma_v^2 I_2)
-sigma_v <- 1.0
-
-priors <- list(
-  lambda_kappa      = lambda_kappa,
-  lambda_sigma_beta = lambda_sigma_beta,
-  sigma_v           = sigma_v,
-  sigma2_epsilon    = list(a = 2.0, b = 0.1),
-  mu                = list(mean = mean(Y_mat), sigma2_mu = 20^2)
-)
-
-# Inizializzazione informata via proiezione regolarizzata di Y_bar sulla mesh
-# (evita lo shock iniziale su sigma2_epsilon all'iterazione 1)
-PhiTPhi_reg <- Matrix::crossprod(Phi) + 1e-3 * Matrix::Diagonal(V)
-mu_init     <- as.vector(Matrix::solve(PhiTPhi_reg, Matrix::crossprod(Phi, rowMeans(Y_mat))))
-beta_init   <- matrix(mu_init, nrow = V, ncol = M)
-
-init_state <- list(
-  theta = list(
-    kappa      = sqrt(8) / (1000 / scale_km), # range iniziale = 1000 km
-    sigma_beta = 1.0,                         # SD marginale iniziale = 1 °C
-    v1         = 0.0,                         # partenza isotropa
-    v2         = 0.0
-  ),
-  sigma2_epsilon = 0.25,
-  mu             = mu_init,
-  beta_mat       = beta_init
-)
-
-# Covarianza iniziale della proposta MH su eta = (log(kappa), log(sigma_beta), v1, v2)
-standard_step <- diag(c(0.08, 0.08, 0.10, 0.10)^2)
+Gx    <- as(spde_matrices$K11, "dgCMatrix")
+Gy    <- as(spde_matrices$K22, "dgCMatrix")
+Gxy   <- as(spde_matrices$K12, "dgCMatrix")
+C_vec <- as.numeric(Matrix::diag(spde_matrices$C))
 
 # ------------------------------------------------------------------------------
-# 4. ESECUZIONE ADAPTIVE PC-GIBBS SAMPLER
+# 3. ESECUZIONE GIBBS SAMPLER C++ (MULTI-CHAIN)
 # ------------------------------------------------------------------------------
 num_iteration <- 5000L
 num_burn_in   <- 1500L
-num_adaptive  <- floor(0.3 * num_burn_in)
 
-cat("\nAvvio Adaptive Anisotropic PC-Gibbs Sampler sui dati reali...\n")
+cat("\n[R] Avvio C++ Gibbs Engine sui dati reali...\n")
 t_start <- proc.time()
 
-# Nota: l'argomento in run_sampler.R su feature/sampler-cpp è al singolare (num_iteration)
-fit <- run_gibbs_sampler(
-  N             = N,
-  V             = V,
-  M             = M,
-  Phi           = Phi,
-  Y_mat         = Y_mat,
-  init_state    = init_state,
-  priors        = priors,
-  matrices      = spde_matrices,
-  num_iteration = num_iteration,
-  num_burn_in   = num_burn_in,
-  standard_step = standard_step,
-  verbose       = TRUE
+fit <- .run_gibbs_sampler_cpp(
+  Phi         = Phi,
+  Y           = Y_mat,
+  Gx          = Gx,
+  Gy          = Gy,
+  Gxy         = Gxy,
+  C           = C_vec,
+  num_iters   = num_iteration,
+  num_burn_in = num_burn_in
 )
 
-elapsed <- (proc.time() - t_start)[["elapsed"]]
+elapsed    <- (proc.time() - t_start)[["elapsed"]]
+num_chains <- length(fit)
 cat(sprintf(
-  "\nCompletate %d iterazioni in %.2f s | MH acceptance rate (post burn-in): %.1f%%\n",
-  num_iteration, elapsed, 100 * fit$acceptance_rate
+  "\n[R] C++ Sampler completato in %.2f s | Catene: %d | Iterazioni/catena: %d (burn-in: %d)\n",
+  elapsed, num_chains, num_iteration, num_burn_in
 ))
 
 # ------------------------------------------------------------------------------
-# 5. DIAGNOSTICA MCMC (CODA, ESS) E RIEPILOGO FISICO A POSTERIORI
+# 4. DIAGNOSTICA MCMC (CODA, ESS, R-HAT) E RIEPILOGO FISICO A POSTERIORI
 # ------------------------------------------------------------------------------
-full_draws <- cbind(
-  kappa      = fit$theta_samples["kappa", ],
-  sigma_beta = fit$theta_samples["sigma_beta", ],
-  v1         = fit$theta_samples["v1", ],
-  v2         = fit$theta_samples["v2", ],
-  sigma2_e   = fit$sigma2_samples
-)
+chain_draws_list <- lapply(fit, function(chain) {
+  th_mat <- do.call(rbind, chain$theta)
+  colnames(th_mat) <- c("kappa", "sigma_beta", "v1", "v2")
+  s2_vec <- as.numeric(unlist(chain$sigma_epsilon))
+  cbind(th_mat, sigma2_e = s2_vec)
+})
 
-n_stored <- nrow(full_draws)
-if (n_stored == num_iteration) {
-  post_idx   <- (num_burn_in + 1L):num_iteration
-  mcmc_start <- num_burn_in + 1L
-} else {
-  post_idx   <- seq_len(n_stored)
-  mcmc_start <- num_burn_in + 1L
-}
+mcmc_post <- coda::mcmc.list(lapply(chain_draws_list, function(mat) {
+  coda::mcmc(mat, start = num_burn_in + 1L)
+}))
 
-# Traceplot in scala fisica interpretabile (con ylim tarato sul post-burn-in per sigma_eps)
-sig_e_full <- sqrt(full_draws[, "sigma2_e"])
-sig_e_ylim <- range(sig_e_full[post_idx]) * c(0.995, 1.3)
+theta_post <- do.call(rbind, chain_draws_list)
 
-par(mfrow = c(2, 3), mar = c(4, 4, 2.2, 1))
-phys_traces <- list(
-  list(y = sig_e_full,                                        main = "sigma_eps (°C) [zoom]", ylab = "°C",   ylim = sig_e_ylim),
-  list(y = (sqrt(8) / full_draws[, "kappa"]) * scale_km,      main = "Range rho (km)",          ylab = "km",   ylim = NULL),
-  list(y = full_draws[, "sigma_beta"],                        main = "sigma_beta (°C)",         ylab = "°C",   ylim = NULL),
-  list(y = full_draws[, "v1"],                                main = "Anisotropia v1",          ylab = "v1",   ylim = NULL),
-  list(y = full_draws[, "v2"],                                main = "Anisotropia v2",          ylab = "v2",   ylim = NULL),
-  list(y = sqrt(full_draws[, "v1"]^2 + full_draws[, "v2"]^2), main = "Norma ||v||",             ylab = "||v||", ylim = NULL)
-)
-for (tr in phys_traces) {
-  plot(tr$y, type = "l", col = "grey30", xlab = "Iterazione",
-       ylab = tr$ylab, main = tr$main, ylim = tr$ylim)
-  if (n_stored == num_iteration) {
-    abline(v = c(num_adaptive, num_burn_in), col = c("steelblue", "firebrick"), lty = 2)
+# Traceplot multi-chain in scala fisica interpretabile (post-burn-in)
+chain_cols <- adjustcolor(c("grey25", "steelblue", "firebrick", "forestgreen")[seq_len(num_chains)], 0.75)
+
+plot_multi_trace <- function(vals_list, main, ylab) {
+  all_v <- unlist(vals_list)
+  yl    <- range(all_v, na.rm = TRUE)
+  n_s   <- length(vals_list[[1]])
+  x_it  <- seq.int(num_burn_in + 1L, num_burn_in + n_s)
+  plot(x_it, vals_list[[1]], type = "l", col = chain_cols[1],
+       xlab = "Iterazione (post burn-in)", ylab = ylab, main = main, ylim = yl)
+  if (length(vals_list) > 1L) {
+    for (ch in 2:length(vals_list)) {
+      lines(x_it, vals_list[[ch]], col = chain_cols[ch])
+    }
   }
 }
+
+par(mfrow = c(2, 3), mar = c(4, 4, 2.2, 1))
+plot_multi_trace(lapply(chain_draws_list, function(m) sqrt(m[, "sigma2_e"])),
+                 "sigma_eps (°C)", "°C")
+plot_multi_trace(lapply(chain_draws_list, function(m) (sqrt(8) / m[, "kappa"]) * scale_km),
+                 "Range rho (km)", "km")
+plot_multi_trace(lapply(chain_draws_list, function(m) m[, "sigma_beta"]),
+                 "sigma_beta (°C)", "°C")
+plot_multi_trace(lapply(chain_draws_list, function(m) m[, "v1"]),
+                 "Anisotropia v1", "v1")
+plot_multi_trace(lapply(chain_draws_list, function(m) m[, "v2"]),
+                 "Anisotropia v2", "v2")
+plot_multi_trace(lapply(chain_draws_list, function(m) sqrt(m[, "v1"]^2 + m[, "v2"]^2)),
+                 "Norma ||v||", "||v||")
 par(mfrow = c(1, 1))
 
-# Riepilogo coda + ESS
-mcmc_post <- coda::mcmc(full_draws[post_idx, ], start = mcmc_start)
+# Riepilogo coda + ESS + Gelman-Rubin
 print(summary(mcmc_post))
-cat("\nEffective Sample Size (ESS):\n")
+cat("\nEffective Sample Size (ESS totale):\n")
 print(round(coda::effectiveSize(mcmc_post), 1))
+if (num_chains > 1L) {
+  cat("\nGelman-Rubin diagnostic (R-hat):\n")
+  print(coda::gelman.diag(mcmc_post, autoburnin = FALSE))
+}
 
-# Grandezze fisiche derivate (Slide 10)
-theta_post      <- full_draws[post_idx, , drop = FALSE]
+# Grandezze fisiche derivate
 kappa_post      <- theta_post[, "kappa"]
 sig_b_post      <- theta_post[, "sigma_beta"]
 v1_post         <- theta_post[, "v1"]
@@ -257,17 +217,14 @@ cat(sprintf("aniso ratio e^||v||: mean = %.3f  | IC 95%% = [%.3f, %.3f]\n",
 cat(sprintf("direzione princ.   : %.1f° (0° = Est-Ovest, ±90° = Nord-Sud)\n", aniso_angle_vec))
 
 # ------------------------------------------------------------------------------
-# 6. CAMPO MEDIO m(s) E ANOMALIE (GESTIONE DIFENSIVA POST-BURN-IN)
+# 5. CAMPO MEDIO m(s) E ANOMALIE (MULTI-CHAIN POST-BURN-IN)
 # ------------------------------------------------------------------------------
-if (ncol(fit$mu_samples) == num_iteration) {
-  mu_post_draws <- fit$mu_samples[, post_idx, drop = FALSE]
-} else {
-  mu_post_draws <- fit$mu_samples
-}
-mu_post_mean <- rowMeans(mu_post_draws)
-mu_hat_obs   <- as.numeric(Phi %*% mu_post_mean)
-y_emp_mean   <- rowMeans(Y_mat)
-anom_emp_obs <- sweep(Y_mat, 1, y_emp_mean, "-")
+mu_samples_mat <- do.call(rbind, lapply(fit, function(chain) do.call(rbind, chain$mu)))
+mu_post_draws  <- t(mu_samples_mat) # V x n_post
+mu_post_mean   <- rowMeans(mu_post_draws)
+mu_hat_obs     <- as.numeric(Phi %*% mu_post_mean)
+y_emp_mean     <- rowMeans(Y_mat)
+anom_emp_obs   <- sweep(Y_mat, 1, y_emp_mean, "-")
 
 cat(sprintf("\nRMSE campo medio (osservato vs Phi*mu_hat): %.3f °C\n",
             sqrt(mean((y_emp_mean - mu_hat_obs)^2))))
@@ -285,30 +242,57 @@ cat(sprintf(
 ))
 
 # ------------------------------------------------------------------------------
-# 7. PREDIZIONE CONTINUA (80x80) E INCERTEZZA A POSTERIORI (VARIANZA TOTALE)
+# 6. PREDIZIONE CONTINUA (80x80) E INCERTEZZA A POSTERIORI (VARIANZA TOTALE)
 # ------------------------------------------------------------------------------
+loc_label <- "Roma" # Aggiorna quando cambi località in Sezione 1
+
 n_grid <- 80L
 x_seq_unit <- seq(min(real_data$boundary[, 1]), max(real_data$boundary[, 1]), length.out = n_grid)
 y_seq_unit <- seq(min(real_data$boundary[, 2]), max(real_data$boundary[, 2]), length.out = n_grid)
 grid_unit  <- as.matrix(expand.grid(x = x_seq_unit, y = y_seq_unit))
 base_grid  <- expand.grid(x = x_seq_unit * scale_km, y = y_seq_unit * scale_km)
 
-# Valutazione FEM continua (mascheratura automatica compatibile con square e knn)
+# Triangolazione di Delaunay pura sulle sole N osservazioni (0 nodi extra a 0)
+mesh_obs <- if (exists("fm_delaunay_2d", envir = asNamespace("fmesher"))) {
+  fmesher::fm_delaunay_2d(real_data$coords)
+} else {
+  fmesher::fm_rcdt_2d_inla(loc = real_data$coords)
+}
+A_obs     <- fmesher::fm_basis(mesh_obs, loc = grid_unit)
+extra_obs <- setdiff(seq_len(mesh_obs$n), mesh_obs$idx$loc)
+in_hull   <- Matrix::rowSums(A_obs) > 0.999
+if (length(extra_obs) > 0L) {
+  in_hull <- in_hull & (Matrix::rowSums(A_obs[, extra_obs, drop = FALSE]) < 1e-8)
+}
+
+# Valutazione FEM continua escludendo anche i pixel agganciati ai nodi vuoti del buffer
 Phi_grid_all <- as.matrix(fmesher::fm_basis(mesh, loc = grid_unit))
+in_mesh      <- in_hull
+if (length(empty_idx) > 0L) {
+  in_mesh <- in_mesh & (rowSums(Phi_grid_all[, empty_idx, drop = FALSE]) < 1e-6)
+}
 
-# Taglia sia il buffer esterno sia gli angolini privi di osservazioni
-mesh_obs <- fmesher::fm_rcdt_2d_inla(loc = real_data$coords)
-in_mesh  <- Matrix::rowSums(fmesher::fm_basis(mesh_obs, loc = grid_unit)) > 0.999
+Phi_grid_in <- Phi_grid_all[in_mesh, , drop = FALSE]
+n_in        <- nrow(Phi_grid_in)
 
-Phi_grid_in  <- Phi_grid_all[in_mesh, , drop = FALSE]
-n_in         <- nrow(Phi_grid_in)
+# Allineamento esatto catena per catena tra mu (thinnato) e theta/sigma2_e
+aligned_mu_list <- vector("list", num_chains)
+aligned_th_list <- vector("list", num_chains)
+for (ch in seq_len(num_chains)) {
+  mu_ch  <- do.call(rbind, fit[[ch]]$mu)
+  th_ch  <- chain_draws_list[[ch]]
+  n_m    <- nrow(mu_ch)
+  n_t    <- nrow(th_ch)
+  th_idx <- round(seq(n_t / n_m, n_t, length.out = n_m))
+  aligned_mu_list[[ch]] <- t(mu_ch)
+  aligned_th_list[[ch]] <- th_ch[th_idx, , drop = FALSE]
+}
+mu_aligned <- do.call(cbind, aligned_mu_list) # V x n_sub
+th_aligned <- do.call(rbind, aligned_th_list) # n_sub x 5
+n_sub      <- nrow(th_aligned)
 
-n_post  <- nrow(theta_post)
-sub_idx <- unique(round(seq(1, n_post, length.out = min(150L, n_post))))
-n_sub   <- length(sub_idx)
-
-PtP    <- Matrix::crossprod(Phi)
-PtY    <- as.matrix(Matrix::crossprod(Phi, Y_mat))
+PtP <- Matrix::crossprod(Phi)
+PtY <- as.matrix(Matrix::crossprod(Phi, Y_mat))
 
 cond_var_acc  <- numeric(n_in)
 mu_grid_draws <- matrix(0, nrow = n_in, ncol = n_sub)
@@ -318,30 +302,26 @@ f_warm_draws  <- matrix(0, nrow = n_in, ncol = n_sub)
 beta_all_acc  <- matrix(0, nrow = V, ncol = M)
 
 for (j in seq_len(n_sub)) {
-  s <- sub_idx[j]
-  s_mu <- if (ncol(mu_post_draws) == n_post) s else {
-    min(ncol(mu_post_draws), max(1L, round(s * ncol(mu_post_draws) / n_post)))
-  }
-  mu_s <- mu_post_draws[, s_mu]
+  mu_s <- mu_aligned[, j]
 
   Q_th <- build_precision_matrix(
     spde_matrices = spde_matrices,
-    kappa         = theta_post[s, "kappa"],
-    sigma_beta    = theta_post[s, "sigma_beta"],
-    v1            = theta_post[s, "v1"],
-    v2            = theta_post[s, "v2"]
+    kappa         = th_aligned[j, "kappa"],
+    sigma_beta    = th_aligned[j, "sigma_beta"],
+    v1            = th_aligned[j, "v1"],
+    v2            = th_aligned[j, "v2"]
   )
-  inv_s2 <- 1 / theta_post[s, "sigma2_e"]
+  inv_s2 <- 1 / th_aligned[j, "sigma2_e"]
 
   Q_post     <- Matrix::forceSymmetric(inv_s2 * PtP + Q_th)
   Sigma_post <- as.matrix(Matrix::solve(Q_post))
 
-  # Varianza condizionale di phi(s)^T beta_i sui punti interni alla mesh
+  # Varianza condizionale di phi(s)^T beta_i sui punti interni
   cond_var_acc <- cond_var_acc + rowSums((Phi_grid_in %*% Sigma_post) * Phi_grid_in)
 
   # Medie condizionali di tutte le anomalie (V x M)
-  rhs_all <- inv_s2 * sweep(PtY, 1, as.numeric(PtP %*% mu_s), "-")
-  m_anom  <- Sigma_post %*% rhs_all
+  rhs_all      <- inv_s2 * sweep(PtY, 1, as.numeric(PtP %*% mu_s), "-")
+  m_anom       <- Sigma_post %*% rhs_all
   beta_all_acc <- beta_all_acc + sweep(m_anom, 1, mu_s, "+")
 
   mu_g <- as.numeric(Phi_grid_in %*% mu_s)
@@ -356,10 +336,10 @@ beta_post_mean <- beta_all_acc / n_sub
 f_all_obs      <- as.matrix(Phi %*% beta_post_mean)
 rmse_all       <- sqrt(mean((Y_mat - f_all_obs)^2))
 rmse_2007      <- sqrt(mean((Y_mat[, which(years == 2007L)] - f_all_obs[, which(years == 2007L)])^2))
-cat(sprintf("In-sample RMSE campo totale -> tutti gli anni: %.3f °C | anno 2007: %.3f °C\n",
-            rmse_all, rmse_2007))
+cat(sprintf("In-sample RMSE campo totale -> tutti gli anni: %.3f °C | anno 2007: %.3f °C (n_sub = %d draw allineati)\n",
+            rmse_all, rmse_2007, n_sub))
 
-# Ricomposizione vettori completi (NA fuori dalla mesh, utile per KNN)
+# Ricomposizione vettori completi (NA fuori dal dominio utile)
 fill_grid <- function(v_in) {
   out <- rep(NA_real_, nrow(grid_unit))
   out[in_mesh] <- v_in
@@ -390,18 +370,13 @@ cat(sprintf("SD predittiva Y*(s)     -> media: %.3f °C (include sigma_eps = %.3
             mean(sqrt(sd_f_warm_vec^2 + mean_s2_e), na.rm = TRUE), sqrt(mean_s2_e)))
 
 # ------------------------------------------------------------------------------
-# 8. VISUALIZZAZIONI PULITE IN GGPLOT2 (ZERO WARNING, ASSI DINAMICI)
+# 7. VISUALIZZAZIONI PULITE IN GGPLOT2 (ZERO WARNING, ASSI DINAMICI)
 # ------------------------------------------------------------------------------
-# Interpolazione P1 lineare sui soli dati osservati per confronto smooth
-mesh_obs <- fmesher::fm_rcdt_2d_inla(loc = real_data$coords)
-A_obs    <- fmesher::fm_basis(mesh_obs, loc = grid_unit)
-in_hull  <- Matrix::rowSums(A_obs) > 0.999
-
 interp_obs_to_grid <- function(vals_obs) {
   v_nodes <- numeric(mesh_obs$n)
   v_nodes[mesh_obs$idx$loc] <- vals_obs
   out <- as.numeric(A_obs %*% v_nodes)
-  out[!in_hull] <- NA_real_
+  out[!in_mesh] <- NA_real_
   out
 }
 
@@ -413,20 +388,20 @@ diff_warm_vec <- obs_warm_vec - spde_warm_vec
 theme_map <- function() {
   theme_minimal(base_size = 10) +
     theme(
-      panel.grid       = element_blank(),
-      panel.border     = element_rect(color = "grey30", fill = NA, linewidth = 0.5),
-      panel.spacing    = unit(0.9, "lines"),
-      strip.text       = element_text(face = "bold", size = 9.5, margin = margin(b = 4)),
-      plot.title       = element_text(face = "bold", hjust = 0.5, size = 10.5),
-      plot.subtitle    = element_text(hjust = 0.5, size = 8.5, color = "grey35"),
-      axis.text        = element_text(size = 8.5),
-      legend.position  = "bottom",
-      legend.title     = element_text(size = 8.5, face = "bold"),
-      legend.text      = element_text(size = 8),
-      legend.key.width = unit(1.0, "cm"),
+      panel.grid        = element_blank(),
+      panel.border      = element_rect(color = "grey30", fill = NA, linewidth = 0.5),
+      panel.spacing     = unit(0.9, "lines"),
+      strip.text        = element_text(face = "bold", size = 9.5, margin = margin(b = 4)),
+      plot.title        = element_text(face = "bold", hjust = 0.5, size = 10.5),
+      plot.subtitle     = element_text(hjust = 0.5, size = 8.5, color = "grey35"),
+      axis.text         = element_text(size = 8.5),
+      legend.position   = "bottom",
+      legend.title      = element_text(size = 8.5, face = "bold"),
+      legend.text       = element_text(size = 8),
+      legend.key.width  = unit(1.0, "cm"),
       legend.key.height = unit(0.28, "cm"),
-      legend.margin    = margin(t = 2),
-      plot.margin      = margin(6, 6, 4, 6)
+      legend.margin     = margin(t = 2),
+      plot.margin       = margin(6, 6, 4, 6)
     )
 }
 
@@ -455,8 +430,8 @@ p_mu <- ggplot(df_mu, aes(x = x, y = y)) +
   coord_fixed() +
   labs(
     title    = "Superficie media stimata m(s)",
-    subtitle = sprintf("Dominio %.0f km su Roma", scale_km),
-    x = "x (km da Roma)", y = "y (km da Roma)"
+    subtitle = sprintf("Dominio %.0f km su %s", scale_km, loc_label),
+    x = sprintf("x (km da %s)", loc_label), y = sprintf("y (km da %s)", loc_label)
   ) +
   theme_map()
 
@@ -495,7 +470,7 @@ plot_year_comparison <- function(year_label, obs_vec, spde_vec, diff_vec) {
     scale_x_continuous(breaks = scales::pretty_breaks(n = 3), expand = c(0, 0)) +
     scale_y_continuous(breaks = scales::pretty_breaks(n = 5), expand = c(0, 0)) +
     coord_fixed() +
-    labs(x = "x (km da Roma)", y = "y (km da Roma)") +
+    labs(x = sprintf("x (km da %s)", loc_label), y = sprintf("y (km da %s)", loc_label)) +
     theme_map()
 
   p_diff <- ggplot(df_diff, aes(x = x, y = y)) +
@@ -510,7 +485,7 @@ plot_year_comparison <- function(year_label, obs_vec, spde_vec, diff_vec) {
     scale_x_continuous(breaks = scales::pretty_breaks(n = 3), expand = c(0, 0)) +
     scale_y_continuous(breaks = scales::pretty_breaks(n = 5), expand = c(0, 0)) +
     coord_fixed() +
-    labs(x = "x (km da Roma)", y = NULL) +
+    labs(x = sprintf("x (km da %s)", loc_label), y = NULL) +
     theme_map()
 
   grid::grid.newpage()
@@ -548,7 +523,7 @@ p_sd_f <- ggplot(df_sd, aes(x = x, y = y)) +
   labs(
     title    = sprintf("SD campo totale f_%d(s)", years[idx_warm]),
     subtitle = sprintf("Media %.3f °C (scala 98° pct: %.2f °C)", mean(df_sd$sd_f, na.rm = TRUE), cap_f),
-    x = "x (km da Roma)", y = "y (km da Roma)"
+    x = sprintf("x (km da %s)", loc_label), y = sprintf("y (km da %s)", loc_label)
   ) +
   theme_map()
 
@@ -566,7 +541,7 @@ p_sd_a <- ggplot(df_sd, aes(x = x, y = y)) +
   labs(
     title    = sprintf("SD anomalia %d (f − m)", years[idx_warm]),
     subtitle = sprintf("Media %.3f °C (range %.2f–%.2f °C)", mean(df_sd$sd_a, na.rm = TRUE), lim_a[1], lim_a[2]),
-    x = "x (km da Roma)", y = NULL
+    x = sprintf("x (km da %s)", loc_label), y = NULL
   ) +
   theme_map()
 
