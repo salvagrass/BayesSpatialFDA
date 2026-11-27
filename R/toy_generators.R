@@ -1,44 +1,42 @@
 #' @title Generate Synthetic Spatial Data for Multi-Year SPDE Models
 #' @description
 #' This function generates synthetic spatial data on a 2D mesh domain for multiple years,
-#' following the exact model formulation:
-#' Y_i = a_i + mu + beta_tilde_i + epsilon_i
+#' following the identifiable model formulation:
+#' Y_{t} = beta_{t} + epsilon_{t}
 #'
-#' Where for each year i = 1, ..., num_year:
-#' - a_i is the global temporal effect for year i, drawn from Normal(a_prior_mean, a_prior_sd^2).
-#' - mu is the long-term average temperature field (constant across years), drawn from Normal(mu_prior_mean, Q_mu^-1).
-#' - beta_tilde_i is the zero-mean spatially correlated anomaly for year i, drawn via SPDE precision Q(tau, h1, h2).
-#' - epsilon_i is the unstructured measurement error for year i.
+#' Where for each year t = 1, ..., num_year:
+#' - mu is the long-term average temperature field, drawn from Normal(mu_prior_mean, Q_mu^-1).
+#' - beta_{t} is the spatially correlated latent field for year t, drawn from Normal(mu, Q_beta^-1).
+#' - Q_beta is the anisotropic SPDE precision matrix governed by tau, k (kappa), gamma, and theta.
+#' - epsilon_{t} is the unstructured measurement error (Gaussian white noise).
 #'
 #' @param mesh An `fm_mesh_2d` object representing the spatial domain.
 #' @param num_year Integer. The number of years (M) to simulate. Default is 10.
-#' @param a_prior_mean Numeric scalar. Mean of the prior for the global temporal effects a_i. Default is 0.0.
-#' @param a_prior_sd Numeric scalar. Standard deviation of the prior for a_i. Default is 10.0.
 #' @param mu_prior_mean Numeric scalar or vector. Mean of the independent prior for the mu field. Default is 0.0.
-#' @param Q_mu Sparse matrix. The precision matrix for mu. Default is 1.0 (Scalar values imply diagonal matrices).
+#' @param Q_mu Sparse matrix or scalar. The precision matrix for mu. Default is 1.0.
 #' @param tau Numeric scalar. SPDE precision parameter. Default is 1.0.
-#' @param k Numeric scalar. SPDE geometric reaction parameter. Default is 1.0.
+#' @param k Numeric scalar. SPDE spatial scale parameter (kappa). Default is 1.0.
+#' @param gamma Numeric scalar. Anisotropy ratio parameter. Default is 1.0 (Isotropic).
+#' @param theta Numeric scalar. Anisotropy rotation angle in radians. Default is 0.0.
 #' @param sigma_e Numeric scalar. Standard deviation of observation noise. Default is 0.1.
 #' @param seed Optional integer for reproducibility.
 #'
 #' @return A list containing the observations and the exact ground truth components:
 #' \itemize{
-#'   \item \code{y_mat}: A matrix of observations (num_year x N).
-#'   \item \code{a_true}: A vector of the global temporal effects (length num_year).
+#'   \item \code{y_mat}: A matrix of observations (N x num_year).
 #'   \item \code{mu_true}: A vector of the long-term spatial mean field (length N).
-#'   \item \code{beta_tilde_mat}: A matrix of the zero-mean spatial anomalies (num_year x N).
-#'   \item \code{latent_field_mat}: A matrix of the true latent field without noise (num_year x N).
+#'   \item \code{beta_mat}: A matrix of the true spatial latent fields (N x num_year).
 #' }
 #' @export
 generate_toy_data <- function(
   mesh,
   num_year = 10,
-  a_prior_mean = 0.0,
-  a_prior_sd = 10.0,
   mu_prior_mean = 0.0,
   Q_mu = 1.0,
   tau = 1.0,
   k = 1.0,
+  gamma = 1.0,
+  theta = 0.0,
   sigma_e = 0.1,
   seed = NULL
 ) {
@@ -48,13 +46,6 @@ generate_toy_data <- function(
   }
 
   N <- nrow(mesh$loc)
-
-  # 1. Global temporal effect vector (vector)
-  a_true <- sample_normal_vector(
-    mean = a_prior_mean,
-    mat = a_prior_sd,
-    N = num_year
-  )
 
   mu_true <- sample_normal_vector(
     mean = mu_prior_mean,
@@ -66,22 +57,25 @@ generate_toy_data <- function(
   # 3. SPDE Precision for beta_tilde_i
   matrices <- build_spde_matrices(mesh, manifold = "planar")
 
-  core_mat <- matrices$K + matrices$C
+  H11 <- gamma * (cos(theta)^2) + (1 / gamma) * (sin(theta)^2)
+  H22 <- gamma * (sin(theta)^2) + (1 / gamma) * (cos(theta)^2)
+  H12 <- (gamma - 1 / gamma) * sin(theta) * cos(theta)
+
+  global_K <- H11 * matrices$K11 + H12 * matrices$K12 + H22 * matrices$K22
+  core_mat <- global_K + (k^2) * matrices$C
   diag_C <- diag(matrices$C)
   Q_beta <- (tau^2) * core_mat %*% Diagonal(x = 1 / diag_C) %*% core_mat
 
-  beta_tilde_mat <- replicate(
+  # 4. Total Latent field
+  beta_mat <- replicate(
     num_year,
     sample_normal_vector(
-      mean = 0.0,
+      mean = mu_true,
       mat = Q_beta,
       N = N,
       is_precision = TRUE
     )
   )
-
-  # 4. Total Latent field
-  latent_field_mat <- outer(mu_true, a_true, "+") + beta_tilde_mat
 
   # 5. Observation noise and final Y
   epsilon <- matrix(
@@ -89,13 +83,11 @@ generate_toy_data <- function(
     nrow = N,
     ncol = num_year
   )
-  y_mat <- latent_field_mat + epsilon
+  y_mat <- beta_mat + epsilon
 
   return(list(
     y_mat = y_mat,
-    a_true = a_true,
     mu_true = mu_true,
-    beta_tilde_mat = beta_tilde_mat,
-    latent_field_mat = latent_field_mat
+    beta_mat = beta_mat
   ))
 }
