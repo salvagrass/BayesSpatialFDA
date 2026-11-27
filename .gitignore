@@ -1,6 +1,10 @@
 .Rproj.user
 .vscode/
+<<<<<<< HEAD
 .DS_Store
 .Rhistory
 data/
 *.RDataTmp
+=======
+.Rhistory
+>>>>>>> main
