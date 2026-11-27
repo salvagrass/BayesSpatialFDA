@@ -23,9 +23,28 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// run_gibbs_sampler
+Rcpp::List run_gibbs_sampler(const Eigen::SparseMatrix<double>& Phi, const Eigen::MatrixXd& Y, const Eigen::SparseMatrix<double>& Gx, const Eigen::SparseMatrix<double>& Gy, const Eigen::SparseMatrix<double>& Gxy, const Eigen::VectorXd& C, size_t num_iters, size_t num_burn_in);
+RcppExport SEXP _BayesSpatialFDA_run_gibbs_sampler(SEXP PhiSEXP, SEXP YSEXP, SEXP GxSEXP, SEXP GySEXP, SEXP GxySEXP, SEXP CSEXP, SEXP num_itersSEXP, SEXP num_burn_inSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Eigen::SparseMatrix<double>& >::type Phi(PhiSEXP);
+    Rcpp::traits::input_parameter< const Eigen::MatrixXd& >::type Y(YSEXP);
+    Rcpp::traits::input_parameter< const Eigen::SparseMatrix<double>& >::type Gx(GxSEXP);
+    Rcpp::traits::input_parameter< const Eigen::SparseMatrix<double>& >::type Gy(GySEXP);
+    Rcpp::traits::input_parameter< const Eigen::SparseMatrix<double>& >::type Gxy(GxySEXP);
+    Rcpp::traits::input_parameter< const Eigen::VectorXd& >::type C(CSEXP);
+    Rcpp::traits::input_parameter< size_t >::type num_iters(num_itersSEXP);
+    Rcpp::traits::input_parameter< size_t >::type num_burn_in(num_burn_inSEXP);
+    rcpp_result_gen = Rcpp::wrap(run_gibbs_sampler(Phi, Y, Gx, Gy, Gxy, C, num_iters, num_burn_in));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_BayesSpatialFDA_build_spde_matrices_cpp", (DL_FUNC) &_BayesSpatialFDA_build_spde_matrices_cpp, 2},
+    {"_BayesSpatialFDA_run_gibbs_sampler", (DL_FUNC) &_BayesSpatialFDA_run_gibbs_sampler, 8},
     {NULL, NULL, 0}
 };
 

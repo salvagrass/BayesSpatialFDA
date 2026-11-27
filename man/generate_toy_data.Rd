@@ -9,53 +9,43 @@ generate_toy_data(
   num_year = 10,
   mu_prior_mean = 0,
   Q_mu = 1,
-  tau = 1,
-  k = 1,
-  gamma = 1,
-  theta = 0,
+  kappa = 1,
+  sigma_beta = 1,
+  v1 = 0,
+  v2 = 0,
   sigma_e = 0.1,
+  locs = NULL,
   seed = NULL
 )
 }
 \arguments{
 \item{mesh}{An \code{fm_mesh_2d} object representing the spatial domain.}
 
-\item{num_year}{Integer. The number of years (M) to simulate. Default is 10.}
+\item{num_year}{Integer. The number of years (\code{M}) to simulate. Default is \code{10}.}
 
-\item{mu_prior_mean}{Numeric scalar or vector. Mean of the independent prior for the mu field. Default is 0.0.}
+\item{mu_prior_mean}{Numeric scalar or vector. Mean of the prior for \code{mu}. Default is \code{0.0}.}
 
-\item{Q_mu}{Sparse matrix or scalar. The precision matrix for mu. Default is 1.0.}
+\item{Q_mu}{Sparse matrix or scalar. The precision matrix for \code{mu}. Default is \code{1.0}.}
 
-\item{tau}{Numeric scalar. SPDE precision parameter. Default is 1.0.}
+\item{kappa}{Numeric scalar. SPDE spatial scale parameter. Default is \code{1.0}.}
 
-\item{k}{Numeric scalar. SPDE spatial scale parameter (kappa). Default is 1.0.}
+\item{sigma_beta}{Numeric scalar. Marginal standard deviation of the latent field. Default is \code{1.0}.}
 
-\item{gamma}{Numeric scalar. Anisotropy ratio parameter. Default is 1.0 (Isotropic).}
+\item{v1}{Numeric scalar. First component of the anisotropy vector \code{v}. Default is \code{0.0}.}
 
-\item{theta}{Numeric scalar. Anisotropy rotation angle in radians. Default is 0.0.}
+\item{v2}{Numeric scalar. Second component of the anisotropy vector \code{v}. Default is \code{0.0}.}
 
-\item{sigma_e}{Numeric scalar. Standard deviation of observation noise. Default is 0.1.}
+\item{sigma_e}{Numeric scalar. Standard deviation of observation noise. Default is \code{0.1}.}
+
+\item{locs}{Optional numeric matrix (\verb{N_obs x 2} or \verb{N_obs x 3}) of observation
+coordinates. If \code{NULL} (default), observations are generated directly at the mesh vertices.}
 
 \item{seed}{Optional integer for reproducibility.}
 }
 \value{
-A list containing the observations and the exact ground truth components:
-\itemize{
-\item \code{y_mat}: A matrix of observations (N x num_year).
-\item \code{mu_true}: A vector of the long-term spatial mean field (length N).
-\item \code{beta_mat}: A matrix of the true spatial latent fields (N x num_year).
-}
+A list containing \code{y_mat} (\verb{N_obs x num_year}), \code{mu_true} (\code{V}),
+\code{beta_mat} (\verb{V x num_year}), \code{Phi} (\verb{N_obs x V}), \code{locs}, and \code{params}.
 }
 \description{
-This function generates synthetic spatial data on a 2D mesh domain for multiple years,
-following the identifiable model formulation:
-Y_{t} = beta_{t} + epsilon_{t}
-
-Where for each year t = 1, ..., num_year:
-\itemize{
-\item mu is the long-term average temperature field, drawn from Normal(mu_prior_mean, Q_mu^-1).
-\item beta_{t} is the spatially correlated latent field for year t, drawn from Normal(mu, Q_beta^-1).
-\item Q_beta is the anisotropic SPDE precision matrix governed by tau, k (kappa), gamma, and theta.
-\item epsilon_{t} is the unstructured measurement error (Gaussian white noise).
-}
+Generate Synthetic Spatial Data for Multi-Year SPDE Models
 }

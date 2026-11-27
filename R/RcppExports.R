@@ -5,3 +5,7 @@
     .Call(`_BayesSpatialFDA_build_spde_matrices_cpp`, V, F)
 }
 
+.run_gibbs_sampler_cpp <- function(Phi, Y, Gx, Gy, Gxy, C, num_iters, num_burn_in) {
+    .Call(`_BayesSpatialFDA_run_gibbs_sampler`, Phi, Y, Gx, Gy, Gxy, C, num_iters, num_burn_in)
+}
+
