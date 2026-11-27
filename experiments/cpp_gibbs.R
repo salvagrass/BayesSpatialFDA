@@ -27,10 +27,10 @@ mesh <- fm_mesh_2d(
 )
 
 V <- mesh$n
-M <- 300L
+M <- 25L
 
 # 10000 osservazioni spaziali non uniformi per ciascuno dei 25 anni
-N <- 10000
+N <- 10000L
 loc_obs <- cbind(
   x = runif(N, 0, dom_length),
   y = dom_length * rbeta(N, shape1 = 0.65, shape2 = 0.65)
@@ -195,8 +195,8 @@ summary_table <- data.frame(
     truth$sigma_beta,
     truth$v1,
     truth$v2,
-    sim_data$mu_true[200],
-    true_beta_mat[200, 1]
+    sim_data$mu_true[1500],
+    true_beta_mat[1500, 1]
   ),
   Mean = unname(c(mean(se_arr), colMeans(th_arr), mean(mu_arr), mean(be_arr))),
   CI_2.5 = unname(c(
